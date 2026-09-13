@@ -394,3 +394,5 @@ start_mac.command
 # .scratch/: 本地 Markdown issue tracker 的 issue/spec 存放目录
 docs/agents/
 .scratch/
+
+.workbuddy/
