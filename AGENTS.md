@@ -91,3 +91,17 @@ https://github.com/Mai-with-u/plugin-repo/blob/main/CONTRIBUTING.md
 不用修改changelog.dev，改动应该都写changelog.md
 一般不写入changelog的内容：
 版本号提升或更新项目依赖
+
+## Agent skills
+
+### Issue tracker
+
+issue 作为 `.scratch/<feature>/` 下的 Markdown 文件跟踪。见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+五个规范标签：needs-triage、needs-info、ready-for-agent、ready-for-human、wontfix。见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+single-context：仓库根 `CONTEXT.md` + `docs/adr/`。见 `docs/agents/domain.md`。

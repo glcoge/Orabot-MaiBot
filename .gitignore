@@ -386,3 +386,9 @@ agentlite/
 /qwen_mai/
 /MaiMaiFocusPet-Godot/
 start_mac.command
+
+# 工程 skills 配置产物（setup-matt-pocock-skills 生成，本地工作文件不入库）
+# docs/agents/: skill 的 issue tracker/triage/domain 约定文档
+# .scratch/: 本地 Markdown issue tracker 的 issue/spec 存放目录
+docs/agents/
+.scratch/
