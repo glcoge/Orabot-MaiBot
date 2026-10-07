@@ -46,6 +46,7 @@ vi.mock('@/lib/config-api', () => ({
 
 vi.mock('@/lib/bot-accounts-api', () => ({
   getDiscoveredBotAccounts: vi.fn(),
+  deleteDiscoveredBotAccount: vi.fn(),
   setDiscoveredBotAccountDisabled: vi.fn(),
 }))
 
@@ -253,9 +254,12 @@ describe('complexFieldHooks', () => {
         <AliasNamesHook fieldPath="bot.alias_names" onChange={onChange} schema={fieldSchema} value={[]} />,
       )
 
-      expect(screen.getByText('暂无别名。')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '添加别名' })).toBeInTheDocument()
 
       await user.click(screen.getByRole('button', { name: '添加别名' }))
+      const editor = screen.getByRole('dialog', { name: '别名列表' })
+      expect(within(editor).getByText('暂无别名。')).toBeInTheDocument()
+      await user.click(within(editor).getByRole('button', { name: '添加别名' }))
       expect(onChange).toHaveBeenLastCalledWith([''])
 
       rerender(
@@ -310,7 +314,7 @@ describe('complexFieldHooks', () => {
 
       expect(screen.getByText('尚未配置任何学习规则。')).toBeInTheDocument()
 
-      await addLearningRule('默认兜底')
+      await addLearningRule('全局默认')
       expect(onChange).toHaveBeenLastCalledWith([
         { type: 'group', use: true, learn: true, platform: '', item_id: '' },
       ])
@@ -327,14 +331,14 @@ describe('complexFieldHooks', () => {
       expect(screen.getByText('全局默认')).toBeInTheDocument()
       expect(screen.getByText('当前范围不需要填写平台或聊天流 ID。')).toBeInTheDocument()
 
-      await addLearningRule('全局通配', '私聊')
+      await addLearningRule('全局默认', '私聊')
       expect(onChange).toHaveBeenLastCalledWith([
         { type: 'group', use: true, learn: true, platform: '', item_id: '' },
-        { type: 'private', use: true, learn: true, platform: '*', item_id: '*' },
+        { type: 'private', use: true, learn: true, platform: '', item_id: '' },
       ])
     })
 
-    it('平台通配、平台兜底和指定聊天流分别写入不同字段', async () => {
+    it('平台默认和指定聊天流分别写入不同字段，不再提供通配范围', async () => {
       const onChange = vi.fn()
       render(
         <ExpressionLearningListHook
@@ -345,12 +349,13 @@ describe('complexFieldHooks', () => {
         />,
       )
 
-      await addLearningRule('平台通配')
-      expect(onChange).toHaveBeenLastCalledWith([
-        { type: 'group', use: true, learn: true, platform: 'qq', item_id: '*' },
-      ])
+      const user = userEvent.setup()
+      await user.click(screen.getByRole('button', { name: '添加学习规则' }))
+      const dialog = await screen.findByRole('dialog')
+      expect(within(dialog).queryByRole('button', { name: /通配/ })).not.toBeInTheDocument()
+      await user.click(within(dialog).getByRole('button', { name: '取消' }))
 
-      await addLearningRule('平台兜底')
+      await addLearningRule('平台默认')
       expect(onChange).toHaveBeenLastCalledWith([
         { type: 'group', use: true, learn: true, platform: 'qq', item_id: '' },
       ])
@@ -382,10 +387,10 @@ describe('complexFieldHooks', () => {
         />,
       )
 
-      expect(screen.getByText('全局默认')).toBeInTheDocument()
-      expect(screen.getByText('全部聊天')).toBeInTheDocument()
-      expect(screen.getByText('qq:全部目标')).toBeInTheDocument()
-      expect(screen.getByText('wx:平台兜底')).toBeInTheDocument()
+      // * 与留空等价：*:* 是全局默认，qq:* 是平台默认
+      expect(screen.getAllByText('全局默认')).toHaveLength(2)
+      expect(screen.getByText('qq:平台默认')).toBeInTheDocument()
+      expect(screen.getByText('wx:平台默认')).toBeInTheDocument()
       expect(screen.getByText('任意平台:777')).toBeInTheDocument()
       expect(screen.getByText(`qq:${chatId}`)).toBeInTheDocument()
       expect(screen.queryByText('使用和学习均关闭')).not.toBeInTheDocument()
@@ -396,7 +401,6 @@ describe('complexFieldHooks', () => {
 
       const platformInputs = screen.getAllByPlaceholderText('qq')
       fireEvent.change(platformInputs[0], { target: { value: 'telegram' } })
-      // 平台通配改平台时会同步把 item_id 写回 *
       expect(onChange).toHaveBeenCalled()
 
       const useSwitches = screen.getAllByRole('switch')
@@ -568,7 +572,7 @@ describe('complexFieldHooks', () => {
         />,
       )
 
-      expect(await screen.findByText('telegram:全部目标')).toBeInTheDocument()
+      expect(await screen.findByText('telegram:平台默认')).toBeInTheDocument()
       await waitFor(() => {
         expect(getBotConfigCachedMock).toHaveBeenCalled()
       })
@@ -678,9 +682,7 @@ describe('complexFieldHooks', () => {
         />,
       )
       expect(screen.getByText('留空:123')).toBeInTheDocument()
-      expect(screen.getByText('任意平台:留空')).toBeInTheDocument()
-      expect(screen.getByText('留空:全部目标')).toBeInTheDocument()
-      expect(screen.getByText('全局默认')).toBeInTheDocument()
+      expect(screen.getAllByText('全局默认')).toHaveLength(3)
 
       const learnSwitches = screen.getAllByRole('switch')
       await user.click(learnSwitches[1])
@@ -1459,9 +1461,9 @@ describe('complexFieldHooks', () => {
       )
 
       expect(screen.getByText('暂无共享记忆组，点击上方按钮添加后可直接选择群聊或私聊。')).toBeInTheDocument()
-      expect(screen.getByRole('link', { name: '聊天管理' })).toHaveAttribute(
+      expect(screen.getByRole('link', { name: '共享组设置' })).toHaveAttribute(
         'href',
-        '/chat-management?view=groups&kind=memory',
+        '/config/bot?mode=groups&kind=memory',
       )
       await waitFor(() => {
         expect(consoleError).toHaveBeenCalled()
@@ -1509,7 +1511,8 @@ describe('complexFieldHooks', () => {
       getChatStreamsMock.mockResolvedValue([
         createChatStream({ platform: '', target_id: '1' }),
         createChatStream({ id: 8, platform: 'qq', target_id: '', group_id: '', chat_type: 'group' }),
-        { ...groupChat, id: 3, chat_type: 'unknown' } as ChatStream,
+        // 模拟后端返回未知 chat_type 的历史数据，用于覆盖过滤分支
+        { ...groupChat, id: 3, chat_type: 'unknown' } as unknown as ChatStream,
         groupChat,
         { ...groupChat, id: 9, display_name: '旧版测试群' },
         privateChat,
@@ -1907,22 +1910,26 @@ describe('complexFieldHooks', () => {
       expect(await screen.findByText('尚未收到适配器上报的账号。')).toBeInTheDocument()
 
       await user.click(screen.getByRole('button', { name: '备用平台账号' }))
+
+      // 主账号信息完整时以卡片展示，点击编辑后才出现输入框
+      await user.click(screen.getByLabelText('编辑主账号'))
       fireEvent.change(screen.getByPlaceholderText('qq'), { target: { value: 'telegram' } })
       expect(onChange).toHaveBeenCalledWith('telegram')
       fireEvent.change(screen.getByPlaceholderText('2814567326'), { target: { value: '999' } })
       expect(onParentChange).toHaveBeenCalledWith('qq_account', '999')
 
+      await user.click(screen.getByLabelText('编辑备用平台 1'))
       fireEvent.change(screen.getByDisplayValue('wx'), { target: { value: 'kook' } })
       expect(onParentChange).toHaveBeenCalledWith('platforms', ['kook:abc', ''])
 
       await user.click(screen.getByLabelText('添加平台'))
       expect(onParentChange).toHaveBeenCalledWith('platforms', ['wx:abc', '', ''])
 
-      await user.click(screen.getByLabelText('删除其他平台 1'))
+      await user.click(screen.getByLabelText('删除备用平台 1'))
       expect(onParentChange).toHaveBeenCalledWith('platforms', [''])
     })
 
-    it('禁用适配器账号失败时展示错误，离线账号显示离线', async () => {
+    it('删除适配器账号失败时展示错误，离线账号显示离线', async () => {
       vi.mocked(botAccountsApi.getDiscoveredBotAccounts).mockResolvedValue([
         {
           id: 8,
@@ -1939,7 +1946,7 @@ describe('complexFieldHooks', () => {
           online: false,
         },
       ])
-      vi.mocked(botAccountsApi.setDiscoveredBotAccountDisabled).mockRejectedValue(new Error('更新失败'))
+      vi.mocked(botAccountsApi.deleteDiscoveredBotAccount).mockRejectedValue(new Error('更新失败'))
 
       render(
         <BotPlatformAccountsHook
@@ -1954,7 +1961,7 @@ describe('complexFieldHooks', () => {
 
       expect(await screen.findByText('离线')).toBeInTheDocument()
       expect(screen.getByText(/入站消息/)).toBeInTheDocument()
-      await userEvent.click(screen.getByRole('button', { name: '排除身份' }))
+      await userEvent.click(screen.getByRole('button', { name: '删除账号' }))
       expect(await screen.findByText('更新失败')).toBeInTheDocument()
     })
 
@@ -1996,8 +2003,11 @@ describe('complexFieldHooks', () => {
       render(
         <AliasNamesHook fieldPath="bot.alias_names" onChange={onChange} schema={fieldSchema} value={null} />,
       )
-      expect(screen.getByText('暂无别名。')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '添加别名' })).toBeInTheDocument()
       await user.click(screen.getByRole('button', { name: '添加别名' }))
+      const editor = screen.getByRole('dialog', { name: '别名列表' })
+      expect(within(editor).getByText('暂无别名。')).toBeInTheDocument()
+      await user.click(within(editor).getByRole('button', { name: '添加别名' }))
       expect(onChange).toHaveBeenLastCalledWith([''])
 
       cleanup()
@@ -2101,10 +2111,10 @@ describe('complexFieldHooks', () => {
         expect(botAccountsApi.setDiscoveredBotAccountDisabled).toHaveBeenCalledWith(4, false)
       })
 
-      vi.mocked(botAccountsApi.setDiscoveredBotAccountDisabled).mockRejectedValueOnce('boom')
-      const excludeButtons = screen.getAllByRole('button', { name: '排除身份' })
+      vi.mocked(botAccountsApi.deleteDiscoveredBotAccount).mockRejectedValueOnce('boom')
+      const excludeButtons = screen.getAllByRole('button', { name: '删除账号' })
       await user.click(excludeButtons[excludeButtons.length - 1])
-      expect(await screen.findByText('更新适配器账号失败')).toBeInTheDocument()
+      expect(await screen.findByText('删除适配器账号失败')).toBeInTheDocument()
 
       vi.mocked(botAccountsApi.getDiscoveredBotAccounts).mockRejectedValueOnce(new Error('网络错误'))
       rerender(

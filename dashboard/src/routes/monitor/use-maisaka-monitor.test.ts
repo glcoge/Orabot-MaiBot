@@ -29,6 +29,7 @@ const LAST_EVENT_ID_STORAGE_KEY = 'maisaka-monitor-last-event-id'
 
 // 监控客户端单例 mock：捕获 subscribe 传入的事件处理器以便测试中手动派发事件
 const clientMocks = vi.hoisted(() => ({
+  onConnectionChange: vi.fn(),
   setInitialReplayCursor: vi.fn(),
   subscribe: vi.fn(),
   updateReplayCursor: vi.fn(),
@@ -138,6 +139,8 @@ function makeStageData(overrides: Record<string, unknown> = {}): Record<string, 
 
 let capturedHandler: MaisakaEventListener | null = null
 let unsubscribeMock: Mock<() => Promise<void>>
+let connectionListener: ((connected: boolean) => void) | null = null
+let connectionUnsubscribeMock: Mock<() => void>
 let fakeStores: FakeStores
 let fakeDb: FakeDb
 
@@ -164,6 +167,14 @@ async function mountMonitor(hookModule: MonitorHookModule, completeInitialSync =
   return view
 }
 
+/** 在 act 内模拟底层 WebSocket 连接状态变化 */
+function emitConnectionChange(connected: boolean) {
+  expect(connectionListener).not.toBeNull()
+  act(() => {
+    connectionListener?.(connected)
+  })
+}
+
 /** 在 act 内把事件派发给被捕获的监控事件处理器 */
 function emitMonitorEvent(type: MaisakaMonitorEvent['type'], data: Record<string, unknown>) {
   expect(capturedHandler).not.toBeNull()
@@ -183,6 +194,15 @@ beforeEach(() => {
   clientMocks.subscribe.mockImplementation(async (listener: MaisakaEventListener) => {
     capturedHandler = listener
     return unsubscribeMock
+  })
+
+  connectionListener = null
+  connectionUnsubscribeMock = vi.fn()
+  clientMocks.onConnectionChange.mockImplementation((listener: (connected: boolean) => void) => {
+    connectionListener = listener
+    // 与真实客户端一致：注册时立即回调当前连接状态
+    listener(true)
+    return connectionUnsubscribeMock
   })
 
   fakeStores = createFakeStores()
@@ -402,6 +422,45 @@ describe('订阅生命周期', () => {
     expect(unsubscribeMock).toHaveBeenCalledTimes(1)
     expect(view.result.current.connected).toBe(false)
   })
+
+  it('connected 跟随底层连接断开与恢复', async () => {
+    const hookModule = await importHookModule()
+    const view = await mountMonitor(hookModule)
+    expect(view.result.current.connected).toBe(true)
+
+    emitConnectionChange(false)
+    expect(view.result.current.connected).toBe(false)
+
+    emitConnectionChange(true)
+    expect(view.result.current.connected).toBe(true)
+    // 已有订阅由底层客户端在重连时自行恢复，不重复订阅
+    expect(clientMocks.subscribe).toHaveBeenCalledTimes(1)
+  })
+
+  it('订阅失败后，连接恢复时自动补订阅', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    clientMocks.subscribe.mockRejectedValueOnce(new Error('后端尚未就绪'))
+    const hookModule = await importHookModule()
+    const view = await mountMonitor(hookModule, false)
+    expect(view.result.current.connected).toBe(false)
+
+    emitConnectionChange(true)
+    await act(async () => {})
+    emitMonitorEvent('stage.snapshot', { entries: [], timestamp: 100 })
+
+    expect(clientMocks.subscribe).toHaveBeenCalledTimes(2)
+    expect(view.result.current.connected).toBe(true)
+  })
+
+  it('最后一个消费者卸载时停止监听连接状态，之后的连接恢复不再订阅', async () => {
+    const hookModule = await importHookModule()
+    const view = await mountMonitor(hookModule)
+    view.unmount()
+
+    expect(connectionUnsubscribeMock).toHaveBeenCalledTimes(1)
+    connectionListener?.(true)
+    expect(clientMocks.subscribe).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('事件入账', () => {
@@ -473,15 +532,65 @@ describe('事件入账', () => {
     expect(window.localStorage.getItem(LAST_EVENT_ID_STORAGE_KEY)).toBeNull()
   })
 
-  it('时间线按时间戳升序排列（乱序到达自动重排）', async () => {
+  it('时间线按事件账本顺序排列（消息时间早于推理完成时间时仍保持事件顺序）', async () => {
     const hookModule = await importHookModule()
     const view = await mountMonitor(hookModule)
 
-    emitMonitorEvent('message.ingested', makeMessageData({ event_id: 202, timestamp: 200 }))
-    emitMonitorEvent('message.ingested', makeMessageData({ event_id: 201, timestamp: 100 }))
+    emitMonitorEvent('message.sent', makeMessageData({ event_id: 202, timestamp: 100 }))
+    emitMonitorEvent('message.ingested', makeMessageData({ event_id: 201, timestamp: 200 }))
 
     expect(view.result.current.allTimeline.map((entry) => entry.id)).toEqual(['evt_201', 'evt_202'])
-    expect(view.result.current.allTimeline.map((entry) => entry.timestamp)).toEqual([100, 200])
+    expect(view.result.current.allTimeline.map((entry) => entry.timestamp)).toEqual([200, 100])
+  })
+
+  it('同一轮 Planner 的过程和完成事件更新原卡片，并保留原时间线位置', async () => {
+    const hookModule = await importHookModule()
+    const view = await mountMonitor(hookModule)
+    const plannerData = {
+      session_id: 'session-a',
+      cycle_id: 7,
+      run_id: 'run-a',
+      timestamp: 100,
+      planner: { content: '先调用工具' },
+      tools: [],
+    }
+
+    emitMonitorEvent('planner.progress', { ...plannerData, event_id: 301 })
+    emitMonitorEvent('message.sent', makeMessageData({ event_id: 302, timestamp: 101 }))
+    emitMonitorEvent('planner.progress', {
+      ...plannerData,
+      event_id: 303,
+      timestamp: 102,
+      tools: [{ tool_call_id: 'tool-1', summary: '完成' }],
+    })
+    emitMonitorEvent('planner.finalized', {
+      ...plannerData,
+      event_id: 304,
+      timestamp: 103,
+      tools: [{ tool_call_id: 'tool-1', summary: '完成' }],
+    })
+
+    expect(view.result.current.allTimeline.map((entry) => entry.id)).toEqual(['evt_301', 'evt_302'])
+    expect(view.result.current.allTimeline[0]).toMatchObject({
+      type: 'planner.finalized',
+      data: { event_id: 304, cycle_id: 7 },
+    })
+  })
+
+  it('重启后复用轮次编号时保留新旧两张 Planner 卡片', async () => {
+    const hookModule = await importHookModule()
+    const view = await mountMonitor(hookModule)
+    const plannerData = { session_id: 'session-a', cycle_id: 1, timestamp: 100, tools: [] }
+
+    emitMonitorEvent('planner.finalized', { ...plannerData, run_id: 'run-old', event_id: 401 })
+    emitMonitorEvent('planner.progress', {
+      ...plannerData,
+      run_id: 'run-new',
+      event_id: 402,
+      timestamp: 200,
+    })
+
+    expect(view.result.current.allTimeline.map((entry) => entry.id)).toEqual(['evt_401', 'evt_402'])
   })
 
   it('缺少 session_id 或 timestamp 非数字的事件被丢弃', async () => {
@@ -652,6 +761,130 @@ describe('message.updated 就地更新', () => {
 
     expect(view.result.current.allTimeline).toHaveLength(1)
     expect(view.result.current.allTimeline[0].data).toMatchObject({ content: '原始内容' })
+  })
+})
+
+describe('会话详情与全局摘要隔离', () => {
+  it('交错到达的旧 Planner 回放不会覆盖较新的完成状态', async () => {
+    const hooks = await importHookModule()
+    const view = await mountMonitor(hooks)
+    const data = { session_id: 'session-a', run_id: 'r', cycle_id: 1, timestamp: 100 }
+    emitMonitorEvent('planner.progress', { ...data, event_id: 301 })
+    emitMonitorEvent('planner.finalized', { ...data, event_id: 303, tools: [{ summary: '已完成' }] })
+    const before = view.result.current.timeline
+    emitMonitorEvent('planner.progress', { ...data, event_id: 302, tools: [] })
+    expect(view.result.current.timeline).toBe(before)
+    expect(view.result.current.timeline[0].type).toBe('planner.finalized')
+    expect(view.result.current.timeline[0].data).toMatchObject({ event_id: 303 })
+  })
+
+  it('其他群的消息、识图和阶段更新只刷新摘要，切过去直接显示已更新的记录', async () => {
+    const hooks = await importHookModule()
+    const overview = renderHook(() => hooks.useMaisakaMonitorOverview())
+    let detailRenders = 0
+    const detail = renderHook(() => {
+      detailRenders += 1
+      return hooks.useMaisakaMonitorSession()
+    })
+    await act(async () => {})
+    emitMonitorEvent('stage.snapshot', { entries: [], timestamp: 100 })
+    emitMonitorEvent('message.ingested', makeMessageData())
+    const before = detail.result.current
+    const rendersBefore = detailRenders
+
+    emitMonitorEvent('message.ingested', makeMessageData({
+      event_id: 102, session_id: 'session-b', content: 'B 群消息', timestamp: 200,
+    }))
+    emitMonitorEvent('message.updated', makeMessageData({
+      event_id: 103, session_id: 'session-b', content: 'B 群识图完成', timestamp: 201,
+    }))
+    emitMonitorEvent('stage.status', makeStageData({
+      event_id: undefined, session_id: 'session-b', stage: '执行工具', timestamp: 202,
+    }))
+
+    expect(detail.result.current).toBe(before)
+    expect(detailRenders).toBe(rendersBefore)
+    expect(overview.result.current.latestMessages.get('session-b')?.data).toMatchObject({
+      content: 'B 群识图完成',
+    })
+    expect(overview.result.current.sessions.get('session-b')?.lastActivity).toBe(202)
+    expect(overview.result.current.stageStatuses.get('session-b')?.stage).toBe('执行工具')
+    // 两个群即使使用相同的消息 ID，也不会更新错会话。
+    expect(detail.result.current.timeline[0].data).toMatchObject({ content: '你好' })
+
+    act(() => overview.result.current.setSelectedSession('session-b'))
+    expect(detail.result.current.timeline).toHaveLength(1)
+    expect(detail.result.current.timeline[0].data).toMatchObject({ content: 'B 群识图完成' })
+    expect(detail.result.current.selectedStageStatus?.stage).toBe('执行工具')
+    expect(clientMocks.subscribe).toHaveBeenCalledTimes(1)
+
+    act(() => detail.result.current.clearTimeline())
+    expect(overview.result.current.latestMessages.size).toBe(0)
+    expect(detail.result.current.timeline).toHaveLength(0)
+  })
+
+  it('后台群的 Planner 进度合并不刷新当前群，阶段更新不重建最新消息摘要', async () => {
+    const hooks = await importHookModule()
+    const overview = renderHook(() => hooks.useMaisakaMonitorOverview())
+    const detail = renderHook(() => hooks.useMaisakaMonitorSession())
+    await act(async () => {})
+    emitMonitorEvent('stage.snapshot', { entries: [], timestamp: 100 })
+    emitMonitorEvent('message.ingested', makeMessageData())
+    const before = detail.result.current
+    const previews = overview.result.current.latestMessages
+    const planner = { session_id: 'session-b', run_id: 'run-b', cycle_id: 1, timestamp: 200 }
+    emitMonitorEvent('planner.progress', { ...planner, event_id: 102 })
+    emitMonitorEvent('planner.finalized', { ...planner, event_id: 103, tools: [] })
+    expect(detail.result.current).toBe(before)
+    expect(overview.result.current.latestMessages).toBe(previews)
+
+    emitMonitorEvent('stage.status', makeStageData({ event_id: undefined }))
+    expect(detail.result.current.selectedStageStatus?.stage).toBe('规划中')
+    expect(detail.result.current.timeline).toBe(before.timeline)
+    expect(overview.result.current.latestMessages).toBe(previews)
+    act(() => overview.result.current.setSelectedSession('session-b'))
+    expect(detail.result.current.timeline).toHaveLength(1)
+    expect(detail.result.current.timeline[0].type).toBe('planner.finalized')
+  })
+
+  it('乱序补发和旧消息识图不覆盖最新消息，也不会让活动时间倒退', async () => {
+    const hooks = await importHookModule()
+    const view = await mountMonitor(hooks)
+    emitMonitorEvent('message.ingested', makeMessageData({ event_id: 103, message_id: 'new', timestamp: 300 }))
+    emitMonitorEvent('message.ingested', makeMessageData({ event_id: 101, message_id: 'old', timestamp: 100 }))
+    emitMonitorEvent('message.updated', makeMessageData({ event_id: 104, message_id: 'old', content: '旧图', timestamp: 100 }))
+    expect(view.result.current.timeline.map((entry) => entry.eventId)).toEqual([101, 103])
+    expect(view.result.current.latestMessages.get('session-a')?.data).toMatchObject({ message_id: 'new' })
+    expect(view.result.current.sessions.get('session-a')?.lastActivity).toBe(300)
+  })
+
+  it('其他群挤出旧历史后仍保留该群摘要，并能接收迟到的识图结果', async () => {
+    fakeDb.getAllFromIndex.mockResolvedValue(
+      Array.from({ length: 3000 }, (_, index) => ({
+        id: `evt_${index + 1}`,
+        eventId: index + 1,
+        type: 'message.ingested' as const,
+        data: makeMessageData({
+          session_id: index === 0 ? 'session-a' : 'session-b',
+          message_id: `msg-${index + 1}`,
+        }) as unknown as TimelineEntry['data'],
+        timestamp: index + 1,
+        sessionId: index === 0 ? 'session-a' : 'session-b',
+        persistedAt: 1,
+      }))
+    )
+    const hooks = await importHookModule()
+    const view = await mountMonitor(hooks)
+    emitMonitorEvent('message.ingested', makeMessageData({
+      event_id: 3001, session_id: 'session-b', message_id: 'new-b', timestamp: 3001,
+    }))
+    expect(view.result.current.allTimeline.some((entry) => entry.sessionId === 'session-a')).toBe(false)
+    expect(view.result.current.latestMessages.has('session-a')).toBe(true)
+    emitMonitorEvent('message.updated', makeMessageData({
+      event_id: 3002, message_id: 'msg-1', content: '识图完成', timestamp: 3002,
+    }))
+    expect(view.result.current.latestMessages.get('session-a')?.data).toMatchObject({ content: '识图完成' })
+    expect(view.result.current.allTimeline).toHaveLength(3000)
   })
 })
 
@@ -1337,9 +1570,7 @@ describe('快照边界与内存裁剪', () => {
       expect.objectContaining({ message_id: 'msg-late' }),
       expect.objectContaining({ message_id: 'msg-later' }),
     ])
-    expect(view.result.current.allTimeline[0].id < view.result.current.allTimeline[1].id).toBe(
-      true
-    )
+    expect(view.result.current.allTimeline[0].id < view.result.current.allTimeline[1].id).toBe(true)
   })
 })
 
@@ -1406,4 +1637,3 @@ describe('订阅进行中的共享与 SSR 短路', () => {
     }
   })
 })
-

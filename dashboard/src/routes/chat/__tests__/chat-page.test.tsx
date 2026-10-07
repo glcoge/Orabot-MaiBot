@@ -7,7 +7,9 @@
  *
  * 注意：vitest.config.ts 开启了 mockReset，所有 vi.fn 的实现必须在 beforeEach 里重建。
  */
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { MaisakaMonitorEvent, StageStatusEvent } from '@/lib/maisaka-monitor-client'
@@ -15,7 +17,13 @@ import type { UserEmojiItem } from '@/lib/user-emoji-api'
 import type { SessionInfo, StageStatusInfo } from '@/routes/monitor/use-maisaka-monitor'
 
 import { ChatPage } from '../index'
-import type { ChatImageAttachment, ChatMessage, ChatRuntimeStatus, ChatTab } from '../types'
+import type {
+  ChatImageAttachment,
+  ChatMessage,
+  ChatRuntimeStatus,
+  ChatTab,
+  ObservedMessagePreview,
+} from '../types'
 
 // ---------- 桩组件 props 类型（只声明页面实际传入且测试用到的字段） ----------
 
@@ -29,6 +37,9 @@ interface MessageListStubProps {
 }
 
 interface ComposerStubProps {
+  userName: string
+  onUpdateUserName: (name: string) => void
+  onUpdateUserAvatar: (file: File) => Promise<void> | void
   value: string
   onChange: (value: string) => void
   onAddImages: (files: FileList) => Promise<void> | void
@@ -47,15 +58,11 @@ interface SidebarStubProps {
   activeObservedSessionId: string | null
   observedSessions: Map<string, SessionInfo>
   observedStageStatuses: Map<string, StageStatusInfo>
-  userId: string
-  userName: string
-  isUploadingUserAvatar: boolean
+  observedLatestMessages: Map<string, ObservedMessagePreview>
   onSwitch: (tabId: string) => void
   onSelectObserved: (sessionId: string) => void
   onOpenObservedSettings: (sessionId: string) => void
   onClose: (tabId: string) => void
-  onUpdateUserAvatar: (file: File) => Promise<void> | void
-  onUpdateUserName: (name: string) => void
 }
 
 interface MonitorStubProps {
@@ -80,6 +87,8 @@ const mocks = vi.hoisted(() => ({
   setSelectedObservedSession: vi.fn(),
   uploadWebuiUserAvatar: vi.fn(),
   loadUserEmojiPayload: vi.fn(),
+  getChatSessionsAdapterStatus: vi.fn(),
+  getAllChatStreams: vi.fn(),
   // 会话消息监听器：tabId -> 监听器列表，由 onSessionMessage 的实现填充
   sessionListeners: new Map<string, Array<(message: Record<string, unknown>) => void>>(),
   connectionListeners: [] as Array<(connected: boolean) => void>,
@@ -142,7 +151,7 @@ vi.mock('@/lib/maisaka-monitor-client', () => ({
 }))
 
 vi.mock('@/routes/monitor/use-maisaka-monitor', () => ({
-  useMaisakaMonitor: mocks.monitorHook,
+  useMaisakaMonitorOverview: mocks.monitorHook,
 }))
 
 vi.mock('@/routes/monitor/maisaka-monitor', () => ({
@@ -161,6 +170,12 @@ vi.mock('@/lib/avatar-url', () => ({
 
 vi.mock('@/lib/user-emoji-api', () => ({
   loadUserEmojiPayload: mocks.loadUserEmojiPayload,
+}))
+
+vi.mock('@/lib/chat-management-api', () => ({
+  CHAT_ADAPTER_STATUS_QUERY_KEY: 'chat-adapter-status',
+  getChatSessionsAdapterStatus: mocks.getChatSessionsAdapterStatus,
+  getAllChatStreams: mocks.getAllChatStreams,
 }))
 
 vi.mock('../MessageList', () => ({
@@ -240,6 +255,19 @@ vi.mock('../ChatWorkspaceSidebar', () => ({
 // 移动端标签条与侧边栏功能重复，桩成空组件避免重复节点干扰断言
 vi.mock('../ChatTabBar', () => ({
   ChatTabBar: () => null,
+}))
+
+// 聊天流设置弹窗：只暴露打开状态与传入的聊天流信息
+vi.mock('@/components/chat-stream-settings-dialog', () => ({
+  ChatStreamSettingsDialog: (props: {
+    chat: { session_id: string; display_name: string } | null
+  }) => (
+    <div
+      data-testid="chat-stream-settings-dialog"
+      data-session-id={props.chat?.session_id ?? ''}
+      data-display-name={props.chat?.display_name ?? ''}
+    />
+  ),
 }))
 
 // ---------- 测试工具函数 ----------
@@ -324,9 +352,17 @@ function presetVirtualTab(): void {
   )
 }
 
+/** 页面内的适配器放行状态查询依赖 QueryClient，测试统一注入独立实例 */
+function queryClientWrapper() {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  )
+}
+
 /** 渲染页面并等待默认标签页连接成功 */
 async function renderConnectedPage() {
-  const result = render(<ChatPage />)
+  const result = render(<ChatPage />, { wrapper: queryClientWrapper() })
   await waitFor(() => {
     expect(screen.getByTestId('tab-webui-default')).toHaveAttribute('data-connected', 'true')
   })
@@ -354,6 +390,8 @@ beforeEach(() => {
   mocks.updateNickname.mockResolvedValue(undefined)
   mocks.closeSession.mockResolvedValue(undefined)
   mocks.uploadWebuiUserAvatar.mockResolvedValue(undefined)
+  mocks.getChatSessionsAdapterStatus.mockResolvedValue({})
+  mocks.getAllChatStreams.mockResolvedValue([])
   mocks.loadUserEmojiPayload.mockResolvedValue({
     name: '猫猫',
     mime_type: 'image/gif',
@@ -384,6 +422,7 @@ beforeEach(() => {
   mocks.monitorHook.mockReturnValue({
     sessions: mocks.observedSessions,
     stageStatuses: mocks.observedStageStatuses,
+    latestMessages: new Map(),
     setSelectedSession: mocks.setSelectedObservedSession,
   })
 })
@@ -392,7 +431,7 @@ afterEach(() => cleanup())
 
 describe('聊天页 ChatPage', () => {
   it('首屏打开默认本地会话：注册监听、传入本地身份、连接成功后启用输入区', async () => {
-    render(<ChatPage />)
+    render(<ChatPage />, { wrapper: queryClientWrapper() })
 
     // 初始为加载历史状态，输入区未连接
     expect(screen.getByTestId('message-list')).toHaveAttribute('data-loading', 'true')
@@ -533,7 +572,7 @@ describe('聊天页 ChatPage', () => {
   it('打开会话失败：提示连接失败且后续发送被拦截', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     mocks.openSession.mockRejectedValue(new Error('offline'))
-    render(<ChatPage />)
+    render(<ChatPage />, { wrapper: queryClientWrapper() })
 
     await waitFor(() => {
       expect(mocks.toast).toHaveBeenCalledWith(
@@ -599,6 +638,28 @@ describe('聊天页 ChatPage', () => {
   })
 
   it('从统一侧边栏选择真实聊天流后显示只读观察，切回本地聊天恢复输入区', async () => {
+    mocks.getAllChatStreams.mockResolvedValue([
+      {
+        session_id: 'observed-1',
+        display_name: '测试群(123)',
+        chat_type: 'group',
+        group_id: '123',
+        user_id: null,
+        platform: 'qq',
+        created_at: 1,
+        last_active_at: 9,
+      },
+      {
+        session_id: 'known-only',
+        display_name: '未触发监控的私聊',
+        chat_type: 'private',
+        group_id: null,
+        user_id: 'u2',
+        platform: 'qq',
+        created_at: 2,
+        last_active_at: 2,
+      },
+    ])
     mocks.observedSessions.set('observed-1', {
       sessionId: 'observed-1',
       sessionName: '测试群(123)',
@@ -609,6 +670,10 @@ describe('聊天页 ChatPage', () => {
       eventCount: 4,
     })
     await renderConnectedPage()
+    await waitFor(() => {
+      expect(screen.getByTestId('observed-known-only')).toHaveTextContent('未触发监控的私聊')
+    })
+    expect(sidebarProps().observedSessions.get('observed-1')?.lastActivity).toBe(10)
 
     act(() => sidebarProps().onSelectObserved('observed-1'))
 
@@ -622,10 +687,15 @@ describe('聊天页 ChatPage', () => {
     expect(screen.queryByTestId('composer')).not.toBeInTheDocument()
 
     act(() => sidebarProps().onOpenObservedSettings('observed-1'))
-    expect(mocks.navigate).toHaveBeenCalledWith({
-      to: '/chat-management',
-      search: { session_id: 'observed-1' },
-    })
+    // 设置在页内弹窗直接打开，不再跳转聊天管理页
+    expect(screen.getByTestId('chat-stream-settings-dialog')).toHaveAttribute(
+      'data-session-id',
+      'observed-1'
+    )
+    expect(screen.getByTestId('chat-stream-settings-dialog')).toHaveAttribute(
+      'data-display-name',
+      '测试群(123)'
+    )
 
     act(() => sidebarProps().onSwitch('webui-default'))
     expect(screen.getByTestId('composer')).toBeInTheDocument()
@@ -635,7 +705,7 @@ describe('聊天页 ChatPage', () => {
   it('从推理详情携带 observe 参数返回时恢复原聊天流观察视图', async () => {
     window.history.replaceState({}, '', '/chat?observe=session%2Fwith%2Fslash')
 
-    render(<ChatPage />)
+    render(<ChatPage />, { wrapper: queryClientWrapper() })
 
     await waitFor(() => {
       expect(mocks.setSelectedObservedSession).toHaveBeenCalledWith('session/with/slash')
@@ -763,11 +833,11 @@ describe('聊天页 ChatPage', () => {
   it('修改昵称：保存到本地并同步 WS，空昵称回退默认值', async () => {
     await renderConnectedPage()
 
-    act(() => sidebarProps().onUpdateUserName(' 新名 '))
+    act(() => composerProps().onUpdateUserName(' 新名 '))
     expect(localStorage.getItem('maibot_webui_user_name')).toBe('新名')
     expect(mocks.updateNickname).toHaveBeenCalledWith('webui-default', '新名')
 
-    act(() => sidebarProps().onUpdateUserName('   '))
+    act(() => composerProps().onUpdateUserName('   '))
     expect(localStorage.getItem('maibot_webui_user_name')).toBe('chat.userNameFallback')
     expect(mocks.updateNickname).toHaveBeenCalledWith('webui-default', 'chat.userNameFallback')
   })
@@ -779,7 +849,7 @@ describe('聊天页 ChatPage', () => {
     const bigFile = new File(['x'], 'big.png', { type: 'image/png' })
     Object.defineProperty(bigFile, 'size', { value: 5 * 1024 * 1024 + 1 })
     await act(async () => {
-      await sidebarProps().onUpdateUserAvatar(bigFile)
+      await composerProps().onUpdateUserAvatar(bigFile)
     })
     expect(mocks.uploadWebuiUserAvatar).not.toHaveBeenCalled()
     expect(mocks.toast).toHaveBeenCalledWith(
@@ -788,7 +858,7 @@ describe('聊天页 ChatPage', () => {
 
     const okFile = new File(['x'], 'avatar.png', { type: 'image/png' })
     await act(async () => {
-      await sidebarProps().onUpdateUserAvatar(okFile)
+      await composerProps().onUpdateUserAvatar(okFile)
     })
     expect(mocks.uploadWebuiUserAvatar).toHaveBeenCalledWith(USER_ID, okFile)
     expect(Number(localStorage.getItem('maibot_webui_user_avatar_version'))).toBeGreaterThan(0)
@@ -1032,7 +1102,7 @@ describe('聊天页 ChatPage', () => {
   it('空白发送被拦截；未连接时发送表情失败', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     mocks.openSession.mockRejectedValue(new Error('offline'))
-    render(<ChatPage />)
+    render(<ChatPage />, { wrapper: queryClientWrapper() })
 
     await waitFor(() => {
       expect(mocks.toast).toHaveBeenCalledWith(
@@ -1075,7 +1145,7 @@ describe('聊天页 ChatPage', () => {
     mocks.uploadWebuiUserAvatar.mockRejectedValue(new Error('磁盘满了'))
     const okFile = new File(['x'], 'avatar.png', { type: 'image/png' })
     await act(async () => {
-      await sidebarProps().onUpdateUserAvatar(okFile)
+      await composerProps().onUpdateUserAvatar(okFile)
     })
     expect(mocks.toast).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1116,7 +1186,10 @@ describe('聊天页 ChatPage', () => {
       sender: { name: '路人', user_id: 'qq_other' },
       emojis: [{ data_url: 'data:image/gif;base64,EEE' }],
     })
-    expect(screen.getByText('user:')).toHaveAttribute('data-segments', 'emoji:data:image/gif;base64,EEE')
+    expect(screen.getByText('user:')).toHaveAttribute(
+      'data-segments',
+      'emoji:data:image/gif;base64,EEE'
+    )
 
     emitSession('webui-default', { type: 'user_message', content: '无发送者', timestamp: 21 })
     expect(screen.getByText('user:无发送者')).toBeInTheDocument()
@@ -1655,7 +1728,7 @@ describe('聊天页 ChatPage', () => {
 
     const textFile = new File(['x'], 'avatar.txt', { type: 'text/plain' })
     await act(async () => {
-      await sidebarProps().onUpdateUserAvatar(textFile)
+      await composerProps().onUpdateUserAvatar(textFile)
     })
     expect(mocks.uploadWebuiUserAvatar).not.toHaveBeenCalled()
     expect(mocks.toast).toHaveBeenCalledWith(
@@ -1665,7 +1738,7 @@ describe('聊天页 ChatPage', () => {
     mocks.uploadWebuiUserAvatar.mockRejectedValue('not-an-error')
     const okFile = new File(['x'], 'avatar.png', { type: 'image/png' })
     await act(async () => {
-      await sidebarProps().onUpdateUserAvatar(okFile)
+      await composerProps().onUpdateUserAvatar(okFile)
     })
     expect(mocks.toast).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1678,7 +1751,7 @@ describe('聊天页 ChatPage', () => {
     mocks.uploadWebuiUserAvatar.mockResolvedValue(undefined)
     const noTypeFile = new File(['x'], 'avatar.bin', { type: '' })
     await act(async () => {
-      await sidebarProps().onUpdateUserAvatar(noTypeFile)
+      await composerProps().onUpdateUserAvatar(noTypeFile)
     })
     expect(mocks.uploadWebuiUserAvatar).toHaveBeenCalledWith(USER_ID, noTypeFile)
   })
@@ -1689,10 +1762,7 @@ describe('聊天页 ChatPage', () => {
     await renderConnectedPage()
 
     await waitFor(() => {
-      expect(console.error).toHaveBeenCalledWith(
-        '[Chat] 订阅 MaiSaka 状态失败:',
-        expect.any(Error)
-      )
+      expect(console.error).toHaveBeenCalledWith('[Chat] 订阅 MaiSaka 状态失败:', expect.any(Error))
     })
     expect(screen.getByTestId('tab-webui-default')).toHaveAttribute('data-connected', 'true')
   })
@@ -1725,7 +1795,7 @@ describe('聊天页 ChatPage', () => {
   it('未连接时修改昵称只写入本地，不调用 WS', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     mocks.openSession.mockRejectedValue(new Error('offline'))
-    render(<ChatPage />)
+    render(<ChatPage />, { wrapper: queryClientWrapper() })
 
     await waitFor(() => {
       expect(mocks.toast).toHaveBeenCalledWith(
@@ -1733,7 +1803,7 @@ describe('聊天页 ChatPage', () => {
       )
     })
 
-    act(() => sidebarProps().onUpdateUserName('离线改名'))
+    act(() => composerProps().onUpdateUserName('离线改名'))
     expect(localStorage.getItem('maibot_webui_user_name')).toBe('离线改名')
     expect(mocks.updateNickname).not.toHaveBeenCalled()
   })
@@ -1765,5 +1835,3 @@ describe('聊天页 ChatPage', () => {
     expect(screen.getByTestId('composer')).toHaveAttribute('data-images', '')
   })
 })
-
-

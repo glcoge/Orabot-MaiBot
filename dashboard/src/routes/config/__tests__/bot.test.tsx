@@ -25,7 +25,10 @@ afterEach(() => {
 
 vi.mock('@/hooks/use-toast', () => ({ useToast: () => ({ toast: toastMock }) }))
 vi.mock('@tanstack/react-router', () => ({
-  Link: ({ children }: { children?: ReactNode }) => <span data-testid="router-link">{children}</span>,
+  useNavigate: () => async () => {},
+  Link: ({ children }: { children?: ReactNode }) => (
+    <span data-testid="router-link">{children}</span>
+  ),
   useRouterState: ({
     select,
   }: {
@@ -58,25 +61,9 @@ vi.mock('@/components/CodeEditor', () => ({
   ),
 }))
 
-// CoreSettings 桩：展示接收到的分节数据，并暴露 personality 修改回调
-vi.mock('../bot/CoreSettings', () => ({
-  CoreSettings: ({
-    botSection,
-    personalitySection,
-    onPersonalitySectionChange,
-  }: {
-    botSection: Record<string, unknown> | null
-    personalitySection: Record<string, unknown> | null
-    onPersonalitySectionChange: (value: Record<string, unknown>) => void
-  }) => (
-    <div data-testid="core-settings">
-      <span data-testid="core-bot">{JSON.stringify(botSection)}</span>
-      <span data-testid="core-personality">{JSON.stringify(personalitySection)}</span>
-      <button type="button" onClick={() => onPersonalitySectionChange({ personality: '新人格' })}>
-        change-personality
-      </button>
-    </div>
-  ),
+// 共享组页面由独立组件维护，这里只验证麦麦设置的模式入口。
+vi.mock('@/routes/chat-management', () => ({
+  SharedGroupsSettings: () => <div data-testid="shared-groups-settings" />,
 }))
 
 // CommandPermissions 桩：只验证页面把 plugin 分节传入并回写
@@ -144,10 +131,7 @@ vi.mock('@/components/dynamic-form', () => ({
           >
             {`change-${schema.className}-${sectionName}`}
           </button>
-          <button
-            type="button"
-            onClick={() => onChange(`${sectionName}.nested.deep`, 'deep-val')}
-          >
+          <button type="button" onClick={() => onChange(`${sectionName}.nested.deep`, 'deep-val')}>
             {`change-deep-${schema.className}-${sectionName}`}
           </button>
           <button type="button" onClick={() => onChange(`${sectionName}.nested`, ['arr'])}>
@@ -194,8 +178,7 @@ vi.mock('smol-toml', async (importOriginal) => {
   const actual = await importOriginal<typeof import('smol-toml')>()
   return {
     ...actual,
-    parse: (input: string) =>
-      tomlParseOverride ? tomlParseOverride(input) : actual.parse(input),
+    parse: (input: string) => (tomlParseOverride ? tomlParseOverride(input) : actual.parse(input)),
   }
 })
 
@@ -218,7 +201,11 @@ function sectionSchema(
   return { className, classDoc, fields: [], nested: {}, ...ui }
 }
 
-function field(name: string, type: FieldSchema['type'], extra: Partial<FieldSchema> = {}): FieldSchema {
+function field(
+  name: string,
+  type: FieldSchema['type'],
+  extra: Partial<FieldSchema> = {}
+): FieldSchema {
   return {
     name,
     type,
@@ -241,7 +228,7 @@ function createDeferred<T>() {
 
 /** 页面挂载时应注册的字段 hook 路径与类型（replace 为缺省） */
 const EXPECTED_FIELD_HOOKS: Array<[string, 'replace' | 'wrapper' | 'hidden']> = [
-  ['bot.platform', 'replace'],
+  ['bot.platform', 'hidden'],
   ['bot.alias_names', 'replace'],
   ['bot.qq_account', 'hidden'],
   ['bot.platforms', 'hidden'],
@@ -257,6 +244,10 @@ const EXPECTED_FIELD_HOOKS: Array<[string, 'replace' | 'wrapper' | 'hidden']> = 
   ['jargon.jargon_groups', 'replace'],
   ['jargon.learning_list', 'replace'],
   ['a_memorix.global_memory_sharing_enabled', 'hidden'],
+  ['a_memorix.plugin.enabled', 'wrapper'],
+  ['a_memorix.person_profile.enabled', 'wrapper'],
+  ['a_memorix.integration.heuristic_memory_recall_enabled', 'wrapper'],
+  ['a_memorix.image_memory.enabled', 'wrapper'],
   ['a_memorix.shared_memory_groups', 'replace'],
   ['a_memorix.filter.chats', 'replace'],
   ['a_memorix.filter.retrieval', 'wrapper'],
@@ -349,7 +340,7 @@ function baseSchema(): { schema: ConfigSchema } {
         }),
         // 无 uiLabel、有 uiParent：应归并进「机器人」tab
         sub_feature: sectionSchema('SubFeatureSection', '子功能配置', { uiParent: 'bot' }),
-        // advanced tab：默认隐藏，点击「更多」后出现
+        // 高级栏目也应直接显示在页面下拉列表中。
         experimental: sectionSchema('ExperimentalSection', '实验性配置', {
           uiLabel: '实验性',
           uiOrder: 3,
@@ -380,8 +371,22 @@ beforeEach(() => {
 async function renderBotPage() {
   const view = render(<BotConfigPage />)
   // 等待初始加载完成（模式切换 tab 出现）
-  await screen.findByRole('tab', { name: '核心设置' })
+  await screen.findByRole('tab', { name: '详细设置' })
   return view
+}
+
+async function getSaveMenuItem(user: ReturnType<typeof userEvent.setup>) {
+  if (!screen.queryByRole('menuitem', { name: /手动保存/ })) {
+    await user.click(screen.getByRole('button', { name: '更多设置' }))
+  }
+  return screen.findByRole('menuitem', { name: /手动保存/ })
+}
+
+async function selectMoreMode(user: ReturnType<typeof userEvent.setup>, name: string) {
+  if (!screen.queryByRole('menuitem', { name })) {
+    await user.click(screen.getByRole('button', { name: '更多设置' }))
+  }
+  await user.click(screen.getByRole('menuitem', { name }))
 }
 
 /** 切换到「详细设置」模式并等待指定分节表单渲染完成 */
@@ -389,18 +394,31 @@ async function enterDetailMode(
   user: ReturnType<typeof userEvent.setup>,
   formTestId = 'form-personality'
 ) {
-  await user.click(screen.getByRole('tab', { name: '详细设置' }))
+  if (screen.getByRole('tab', { name: '详细设置' }).getAttribute('data-state') !== 'active') {
+    await user.click(screen.getByRole('tab', { name: '详细设置' }))
+  }
+  if (formTestId === 'form-personality' && !screen.queryByTestId(formTestId)) {
+    await selectConfigPage(user, '人格')
+  }
   await screen.findByTestId(formTestId)
 }
 
+async function openConfigMenu(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('button', { name: '选择设置页面' }))
+  return screen.findByRole('menu')
+}
+
+async function selectConfigPage(user: ReturnType<typeof userEvent.setup>, name: string) {
+  await openConfigMenu(user)
+  await user.click(screen.getByRole('menuitem', { name }))
+}
+
 describe('BotConfigPage 特征化', () => {
-  it('初始加载调用 getBotConfigCached + getBotConfigSchema，核心设置展示分节数据', async () => {
+  it('初始加载配置并展示详细设置', async () => {
     await renderBotPage()
     expect(configApi.getBotConfigCached).toHaveBeenCalledTimes(1)
     expect(configApi.getBotConfigSchema).toHaveBeenCalledTimes(1)
-    // 核心设置模式默认渲染，接收 bot / personality 分节
-    expect(screen.getByTestId('core-bot')).toHaveTextContent('麦麦')
-    expect(screen.getByTestId('core-personality')).toHaveTextContent('原始人格')
+    expect(screen.getByTestId('form-bot')).toBeInTheDocument()
   })
 
   it('初始加载失败时弹出加载失败 toast', async () => {
@@ -419,16 +437,21 @@ describe('BotConfigPage 特征化', () => {
     const user = userEvent.setup()
     await renderBotPage()
 
-    // 初始无未保存更改：保存按钮为「已保存」且禁用
-    expect(screen.getByRole('button', { name: '已保存' })).toBeDisabled()
+    // 初始无未保存更改：菜单中的手动保存禁用
+    expect(await getSaveMenuItem(user)).toHaveAttribute('aria-disabled', 'true')
+    await user.keyboard('{Escape}')
 
-    await user.click(screen.getByText('change-personality'))
-    const saveButton = await screen.findByRole('button', { name: '保存' })
+    await enterDetailMode(user)
+    await user.click(screen.getByText('change-personality-personality'))
+    const saveButton = await getSaveMenuItem(user)
     await user.click(saveButton)
 
     await waitFor(() => expect(configApi.updateBotConfig).toHaveBeenCalledTimes(1))
     const savedConfig = vi.mocked(configApi.updateBotConfig).mock.calls[0][0]
-    expect(savedConfig.personality).toEqual({ personality: '新人格' })
+    expect(savedConfig.personality).toEqual({
+      personality: '原始人格',
+      stub_field: 'personality-新值',
+    })
     expect(savedConfig.bot).toEqual({ nickname: '麦麦', qq_account: 12345 })
     // 加载时剥离的 legacy memory 不应回写
     expect('memory' in savedConfig).toBe(false)
@@ -437,7 +460,7 @@ describe('BotConfigPage 特征化', () => {
     // 手动保存经过 autosave barrier：待执行的分区防抖保存被取消
     expect(configApi.updateBotConfigSection).not.toHaveBeenCalled()
     // 保存完成后回到「已保存」状态
-    await screen.findByRole('button', { name: '已保存' })
+    await getSaveMenuItem(user)
   })
 
   it('手动保存失败时弹出保存失败 toast', async () => {
@@ -445,8 +468,9 @@ describe('BotConfigPage 特征化', () => {
     const user = userEvent.setup()
     await renderBotPage()
 
-    await user.click(screen.getByText('change-personality'))
-    await user.click(await screen.findByRole('button', { name: '保存' }))
+    await enterDetailMode(user)
+    await user.click(screen.getByText('change-personality-personality'))
+    await user.click(await getSaveMenuItem(user))
 
     await waitFor(() =>
       expect(toastMock).toHaveBeenCalledWith({
@@ -461,16 +485,17 @@ describe('BotConfigPage 特征化', () => {
     const user = userEvent.setup()
     await renderBotPage()
 
-    await user.click(screen.getByText('change-personality'))
-    await user.click(screen.getByRole('tab', { name: '源文件' }))
+    await enterDetailMode(user)
+    await user.click(screen.getByText('change-personality-personality'))
+    await selectMoreMode(user, '源文件编辑')
 
     expect(toastMock).toHaveBeenCalledWith({
       variant: 'destructive',
       title: '切换失败',
       description: '请先保存当前更改',
     })
-    // 仍停留在核心设置模式
-    expect(screen.getByTestId('core-settings')).toBeInTheDocument()
+    // 仍停留在详细设置模式
+    expect(screen.getByTestId('form-personality')).toBeInTheDocument()
     expect(screen.queryByPlaceholderText('TOML 配置内容')).not.toBeInTheDocument()
   })
 
@@ -493,7 +518,7 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       const editor = await screen.findByPlaceholderText('TOML 配置内容')
       expect(configApi.getBotConfigRaw).toHaveBeenCalledTimes(1)
       // \n 转义序列被展开成真实换行
@@ -506,12 +531,12 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       const editor = await screen.findByPlaceholderText('TOML 配置内容')
       // 双引号字符串内含真实换行，保存前应转义回 \n
       fireEvent.change(editor, { target: { value: 'title = "a\nb"' } })
 
-      await user.click(await screen.findByRole('button', { name: '保存' }))
+      await user.click(await getSaveMenuItem(user))
       await waitFor(() =>
         expect(configApi.updateBotConfigRaw).toHaveBeenCalledWith('title = "a\\nb"')
       )
@@ -524,11 +549,11 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       const editor = await screen.findByPlaceholderText('TOML 配置内容')
       fireEvent.change(editor, { target: { value: 'a =' } })
 
-      await user.click(await screen.findByRole('button', { name: '保存' }))
+      await user.click(await getSaveMenuItem(user))
       await waitFor(() =>
         expect(toastMock).toHaveBeenCalledWith({
           variant: 'destructive',
@@ -545,7 +570,7 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       await screen.findByText('文件模式：')
       await user.click(screen.getByRole('button', { name: '关闭文件模式提示' }))
 
@@ -555,33 +580,21 @@ describe('BotConfigPage 特征化', () => {
   })
 
   describe('详细设置模式', () => {
-    it('按 schema 构建 tab 分组：uiOrder 排序、uiParent 归并、advanced 默认隐藏', async () => {
-      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    it('栏目下拉列表按 uiOrder 排序，包含高级栏目并归并 uiParent', async () => {
       const user = userEvent.setup()
       await renderBotPage()
       await enterDetailMode(user)
-
-      // 模式切换时重新读取一次完整配置
-      expect(configApi.getBotConfig).toHaveBeenCalledTimes(1)
-
-      // tab 按 uiOrder 排序，advanced 的「实验性」默认隐藏
-      const tabList = document.querySelector('[data-config-bot-tab-list="true"]') as HTMLElement
-      const tabNames = within(tabList)
-        .getAllByRole('tab')
-        .map((tab) => tab.textContent)
-      expect(tabNames).toEqual(['人格', '机器人'])
-
-      // 「人格」tab 默认激活，表单仅包含自身分节
+      expect(configApi.getBotConfig).not.toHaveBeenCalled()
       expect(screen.getByTestId('form-personality-sections')).toHaveTextContent('personality')
       expect(screen.getByTestId('form-personality-values')).toHaveTextContent('原始人格')
-
-      // uiParent 指向 bot 的 sub_feature 归并进「机器人」tab
-      await user.click(within(tabList).getByRole('tab', { name: '机器人' }))
+      const menu = await openConfigMenu(user)
+      expect(
+        within(menu)
+          .getAllByRole('menuitem')
+          .map((item) => item.textContent)
+      ).toEqual(['人格', '机器人', '实验性'])
+      await user.click(within(menu).getByRole('menuitem', { name: '机器人' }))
       expect(await screen.findByTestId('form-bot-sections')).toHaveTextContent('bot,sub_feature')
-
-      // 点击「更多」后 advanced tab 出现
-      await user.click(screen.getByRole('button', { name: '更多' }))
-      expect(within(tabList).getByRole('tab', { name: '实验性' })).toBeInTheDocument()
     })
 
     it('表单修改更新分节值，防抖后按分节自动保存', async () => {
@@ -594,7 +607,7 @@ describe('BotConfigPage 特征化', () => {
       // 分节值立即更新并回传表单
       expect(screen.getByTestId('form-personality-values')).toHaveTextContent('personality-新值')
       // 出现未保存标记
-      expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument()
+      expect(await getSaveMenuItem(user)).toBeInTheDocument()
 
       // 2 秒防抖后触发分区自动保存
       await waitFor(
@@ -606,7 +619,7 @@ describe('BotConfigPage 特征化', () => {
         { timeout: 4000 }
       )
       // 自动保存完成后回到「已保存」状态
-      await screen.findByRole('button', { name: '已保存' })
+      await getSaveMenuItem(user)
     })
 
     it('「高级设置」按钮切换表单的 advancedVisible', async () => {
@@ -616,7 +629,7 @@ describe('BotConfigPage 特征化', () => {
       await enterDetailMode(user)
 
       expect(screen.getByTestId('form-personality')).toHaveAttribute('data-advanced', 'false')
-      await user.click(screen.getByRole('button', { name: '高级设置' }))
+      await user.click(screen.getByRole('switch', { name: '高级设置' }))
       expect(screen.getByTestId('form-personality')).toHaveAttribute('data-advanced', 'true')
     })
 
@@ -626,8 +639,7 @@ describe('BotConfigPage 特征化', () => {
       await renderBotPage()
       await enterDetailMode(user)
 
-      await user.click(screen.getByRole('button', { name: '更多' }))
-      await user.click(screen.getByRole('tab', { name: '实验性' }))
+      await selectConfigPage(user, '实验性')
 
       // 实验性功能提示对话框
       expect(await screen.findByText('实验性功能')).toBeInTheDocument()
@@ -639,16 +651,12 @@ describe('BotConfigPage 特征化', () => {
       expect(screen.getByTestId('form-experimental')).toBeInTheDocument()
     })
 
-    it('tab 使用引导可通过「我知道了」关闭并记忆', async () => {
+    it('栏目入口无需旧版展开引导即可显示全部页面', async () => {
       const user = userEvent.setup()
       await renderBotPage()
-      await enterDetailMode(user)
-
-      expect(screen.getByText(/展开隐藏配置栏目/)).toBeInTheDocument()
-      await user.click(screen.getByRole('button', { name: '我知道了' }))
-
       expect(screen.queryByText(/展开隐藏配置栏目/)).not.toBeInTheDocument()
-      expect(localStorage.getItem('bot-config-tabs-guide-dismissed')).toBe('true')
+      const menu = await openConfigMenu(user)
+      expect(within(menu).getAllByRole('menuitem')).toHaveLength(3)
     })
   })
 
@@ -698,7 +706,7 @@ describe('BotConfigPage 特征化', () => {
       expect(screen.getByRole('status', { name: '加载中' })).toBeInTheDocument()
 
       deferred.resolve(baseConfig())
-      await screen.findByRole('tab', { name: '核心设置' })
+      await screen.findByRole('tab', { name: '详细设置' })
       expect(screen.queryByRole('status', { name: '加载中' })).not.toBeInTheDocument()
     })
 
@@ -720,7 +728,7 @@ describe('BotConfigPage 特征化', () => {
       await renderBotPage()
 
       await user.click(screen.getByRole('tab', { name: '详细设置' }))
-      await waitFor(() => expect(configApi.getBotConfig).toHaveBeenCalledTimes(1))
+      expect(configApi.getBotConfig).not.toHaveBeenCalled()
 
       expect(document.querySelector('[data-config-bot-tab-list="true"]')).toBeNull()
       expect(screen.queryByTestId(/form-/)).not.toBeInTheDocument()
@@ -732,7 +740,7 @@ describe('BotConfigPage 特征化', () => {
       await renderBotPage()
 
       await user.click(screen.getByRole('tab', { name: '详细设置' }))
-      await waitFor(() => expect(configApi.getBotConfig).toHaveBeenCalledTimes(1))
+      expect(configApi.getBotConfig).not.toHaveBeenCalled()
       expect(document.querySelector('[data-config-bot-tab-list="true"]')).toBeNull()
     })
 
@@ -744,7 +752,7 @@ describe('BotConfigPage 特征化', () => {
       await renderBotPage()
 
       await user.click(screen.getByRole('tab', { name: '详细设置' }))
-      await waitFor(() => expect(configApi.getBotConfig).toHaveBeenCalledTimes(1))
+      expect(configApi.getBotConfig).not.toHaveBeenCalled()
       expect(document.querySelector('[data-config-bot-tab-list="true"]')).toBeNull()
     })
 
@@ -756,7 +764,7 @@ describe('BotConfigPage 特征化', () => {
       expect(await screen.findByTestId('command-plugin')).toHaveTextContent('null')
 
       await user.click(screen.getByText('change-plugin'))
-      await user.click(await screen.findByRole('button', { name: '保存' }))
+      await user.click(await getSaveMenuItem(user))
 
       await waitFor(() => expect(configApi.updateBotConfig).toHaveBeenCalledTimes(1))
       const savedConfig = vi.mocked(configApi.updateBotConfig).mock.calls[0][0] as Record<
@@ -787,6 +795,7 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
+      await selectMoreMode(user, '源文件编辑')
       await user.click(screen.getByRole('tab', { name: '详细设置' }))
       await waitFor(() =>
         expect(toastMock).toHaveBeenCalledWith({
@@ -802,7 +811,7 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       await waitFor(() =>
         expect(toastMock).toHaveBeenCalledWith({
           variant: 'destructive',
@@ -817,7 +826,7 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       await waitFor(() =>
         expect(toastMock).toHaveBeenCalledWith({
           variant: 'destructive',
@@ -852,7 +861,7 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       await screen.findByPlaceholderText('TOML 配置内容')
       await user.click(screen.getByRole('button', { name: '刷新' }))
 
@@ -873,7 +882,7 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       await screen.findByPlaceholderText('TOML 配置内容')
       toastMock.mockClear()
       await user.click(screen.getByRole('button', { name: '刷新' }))
@@ -896,10 +905,10 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       const editor = await screen.findByPlaceholderText('TOML 配置内容')
       fireEvent.change(editor, { target: { value: 'title = "ok"' } })
-      await user.click(await screen.findByRole('button', { name: '保存' }))
+      await user.click(await getSaveMenuItem(user))
 
       await waitFor(() =>
         expect(toastMock).toHaveBeenCalledWith({
@@ -916,10 +925,10 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       const editor = await screen.findByPlaceholderText('TOML 配置内容')
       fireEvent.change(editor, { target: { value: 'title = "ok"' } })
-      await user.click(await screen.findByRole('button', { name: '保存' }))
+      await user.click(await getSaveMenuItem(user))
 
       await waitFor(() =>
         expect(toastMock).toHaveBeenCalledWith({
@@ -934,10 +943,10 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       const editor = await screen.findByPlaceholderText('TOML 配置内容')
       fireEvent.change(editor, { target: { value: 'a =' } })
-      await user.click(await screen.findByRole('button', { name: '保存' }))
+      await user.click(await getSaveMenuItem(user))
       expect(await screen.findByText('⚠️ TOML 格式错误：')).toBeInTheDocument()
 
       fireEvent.change(editor, { target: { value: 'title = "fixed"' } })
@@ -952,13 +961,13 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       const editor = await screen.findByPlaceholderText('TOML 配置内容')
       expect(editor).toHaveValue('msg = "a\tb\\e"')
 
       // 必须改成不同内容，相同值不会把保存按钮切到「保存」
       fireEvent.change(editor, { target: { value: 'msg = "z\tb\\e"' } })
-      await user.click(await screen.findByRole('button', { name: '保存' }))
+      await user.click(await getSaveMenuItem(user))
       await waitFor(() =>
         expect(configApi.updateBotConfigRaw).toHaveBeenCalledWith('msg = "z\\tb\\\\e"')
       )
@@ -970,10 +979,11 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByText('change-personality'))
-      await user.click(await screen.findByRole('button', { name: '保存' }))
+      await enterDetailMode(user)
+      await user.click(screen.getByText('change-personality-personality'))
+      await user.click(await getSaveMenuItem(user))
 
-      expect(await screen.findByRole('button', { name: '保存中' })).toBeDisabled()
+      expect(await getSaveMenuItem(user)).toHaveAttribute('aria-disabled', 'true')
       deferred.resolve({})
       await waitFor(() =>
         expect(toastMock).toHaveBeenCalledWith({
@@ -983,16 +993,16 @@ describe('BotConfigPage 特征化', () => {
       )
     })
 
-    it('从源文件切回核心设置会重新拉取可视化配置', async () => {
+    it('从源文件切回共享组设置会重新拉取可视化配置', async () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       await screen.findByPlaceholderText('TOML 配置内容')
-      await user.click(screen.getByRole('tab', { name: '核心设置' }))
+      await selectMoreMode(user, '共享组设置')
 
       await waitFor(() => expect(configApi.getBotConfig).toHaveBeenCalledTimes(1))
-      expect(await screen.findByTestId('core-settings')).toBeInTheDocument()
+      expect(await screen.findByTestId('shared-groups-settings')).toBeInTheDocument()
       expect(screen.queryByPlaceholderText('TOML 配置内容')).not.toBeInTheDocument()
     })
 
@@ -1003,10 +1013,10 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       const editor = await screen.findByPlaceholderText('TOML 配置内容')
       fireEvent.change(editor, { target: { value: 'title = "ok"' } })
-      await user.click(await screen.findByRole('button', { name: '保存' }))
+      await user.click(await getSaveMenuItem(user))
 
       await waitFor(() =>
         expect(toastMock).toHaveBeenCalledWith({ title: '保存成功', description: '配置已保存' })
@@ -1024,52 +1034,37 @@ describe('BotConfigPage 特征化', () => {
       const user = userEvent.setup()
       await renderBotPage()
 
-      await user.click(screen.getByRole('tab', { name: '源文件' }))
+      await selectMoreMode(user, '源文件编辑')
       const editor = await screen.findByPlaceholderText('TOML 配置内容')
       fireEvent.change(editor, { target: { value: 'foo bar = 1' } })
-      await user.click(await screen.findByRole('button', { name: '保存' }))
+      await user.click(await getSaveMenuItem(user))
 
       // 翻译后仍保留 smol-toml 的多行指针，所以只匹配中文主句
-      expect(
-        await screen.findByText(/键名只能包含字母、数字、短横线和下划线/)
-      ).toBeInTheDocument()
+      expect(await screen.findByText(/键名只能包含字母、数字、短横线和下划线/)).toBeInTheDocument()
       expect(configApi.updateBotConfigRaw).not.toHaveBeenCalled()
     })
   })
 
   describe('详细设置分节导航', () => {
-    it('收起更多时若当前是高级 tab 则回到第一个普通 tab', async () => {
-      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    it('关闭栏目菜单保留已选中的高级页面', async () => {
       localStorage.setItem('bot-config-experimental-features-notice-dismissed', 'true')
       const user = userEvent.setup()
       await renderBotPage()
-      await enterDetailMode(user)
-
-      const tabList = document.querySelector('[data-config-bot-tab-list="true"]') as HTMLElement
-      await user.click(within(tabList).getByRole('button', { name: '更多' }))
-      await user.click(within(tabList).getByRole('tab', { name: '实验性' }))
+      await selectConfigPage(user, '实验性')
       expect(await screen.findByTestId('form-experimental')).toBeInTheDocument()
-
-      await user.click(within(tabList).getByRole('button', { name: '收起' }))
-      expect(within(tabList).queryByRole('tab', { name: '实验性' })).not.toBeInTheDocument()
-      expect(await screen.findByTestId('form-personality')).toBeInTheDocument()
+      await openConfigMenu(user)
+      await user.keyboard('{Escape}')
+      expect(screen.getByTestId('form-experimental')).toBeInTheDocument()
     })
 
-    it('收起更多时若当前是普通 tab 则保持该 tab', async () => {
-      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    it('关闭栏目菜单保留普通页面', async () => {
       const user = userEvent.setup()
       await renderBotPage()
-      await enterDetailMode(user)
-
-      const tabList = document.querySelector('[data-config-bot-tab-list="true"]') as HTMLElement
-      await user.click(within(tabList).getByRole('tab', { name: '机器人' }))
+      await selectConfigPage(user, '机器人')
       expect(await screen.findByTestId('form-bot')).toBeInTheDocument()
-
-      await user.click(within(tabList).getByRole('button', { name: '更多' }))
-      expect(within(tabList).getByRole('tab', { name: '实验性' })).toBeInTheDocument()
-      await user.click(within(tabList).getByRole('button', { name: '收起' }))
-
-      expect(within(tabList).queryByRole('tab', { name: '实验性' })).not.toBeInTheDocument()
+      const menu = await openConfigMenu(user)
+      expect(within(menu).getByRole('menuitem', { name: '实验性' })).toBeInTheDocument()
+      await user.keyboard('{Escape}')
       expect(screen.getByTestId('form-bot')).toBeInTheDocument()
     })
 
@@ -1115,10 +1110,7 @@ describe('BotConfigPage 特征化', () => {
         },
       } as never)
       localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
-      const user = userEvent.setup()
-      await renderBotPage()
-
-      await user.click(screen.getByRole('tab', { name: '详细设置' }))
+      render(<BotConfigPage />)
       expect(await screen.findByText('实验性功能')).toBeInTheDocument()
     })
 
@@ -1129,8 +1121,7 @@ describe('BotConfigPage 特征化', () => {
       await renderBotPage()
       await enterDetailMode(user)
 
-      await user.click(screen.getByRole('button', { name: '更多' }))
-      await user.click(screen.getByRole('tab', { name: '实验性' }))
+      await selectConfigPage(user, '实验性')
 
       expect(screen.queryByText('实验性功能')).not.toBeInTheDocument()
       expect(await screen.findByTestId('form-experimental')).toBeInTheDocument()
@@ -1142,8 +1133,7 @@ describe('BotConfigPage 特征化', () => {
       await renderBotPage()
       await enterDetailMode(user)
 
-      await user.click(screen.getByRole('button', { name: '更多' }))
-      await user.click(screen.getByRole('tab', { name: '实验性' }))
+      await selectConfigPage(user, '实验性')
       expect(await screen.findByText('实验性功能')).toBeInTheDocument()
 
       await user.keyboard('{Escape}')
@@ -1151,7 +1141,7 @@ describe('BotConfigPage 特征化', () => {
       expect(localStorage.getItem('bot-config-experimental-features-notice-dismissed')).toBe('true')
     })
 
-    it('全部为高级 tab 时默认只显示更多，展开后才能切换', async () => {
+    it('全部为高级栏目时下拉菜单直接显示全部栏目', async () => {
       vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
         schema: {
           className: 'BotConfigRoot',
@@ -1172,17 +1162,13 @@ describe('BotConfigPage 特征化', () => {
       await renderBotPage()
 
       await user.click(screen.getByRole('tab', { name: '详细设置' }))
-      const tabList = await waitFor(() => {
-        const node = document.querySelector('[data-config-bot-tab-list="true"]') as HTMLElement | null
-        if (!node) throw new Error('missing tab list')
-        return node
-      })
-      expect(within(tabList).queryByRole('tab', { name: '实验性' })).not.toBeInTheDocument()
-      await user.click(within(tabList).getByRole('button', { name: '更多' }))
-      expect(within(tabList).getByRole('tab', { name: '实验性' })).toBeInTheDocument()
+      const tabList = await openConfigMenu(user)
+      expect(within(tabList).getByRole('menuitem', { name: '实验性' })).toBeInTheDocument()
+      await user.keyboard('{Escape}')
+      expect(screen.getByTestId('form-experimental')).toBeInTheDocument()
     })
 
-    it('uiUseSubTabs 按根字段/子类/高级子页拆分，并展示聊天管理提示', async () => {
+    it('uiUseSubTabs 按根字段/子类/高级子页拆分，聊天子页不再显示回复风格', async () => {
       const config = {
         ...baseConfig(),
         chat: { enabled: true, reply_timing: { talk_value: 1 }, reply_style: { style: 'a' } },
@@ -1195,25 +1181,27 @@ describe('BotConfigPage 特征化', () => {
       await renderBotPage()
       await enterDetailMode(user, 'form-ChatSectionRoot')
 
-      const tabList = document.querySelector('[data-config-bot-tab-list="true"]') as HTMLElement
-      expect(within(tabList).getByRole('tab', { name: '聊天' })).toBeInTheDocument()
-      await user.click(within(tabList).getByRole('tab', { name: '空栏目' }))
+      const tabList = await openConfigMenu(user)
+      expect(within(tabList).getByRole('menuitem', { name: '聊天' })).toBeInTheDocument()
+      await user.click(within(tabList).getByRole('menuitem', { name: '空栏目' }))
       expect(screen.queryByTestId('form-EmptySub')).not.toBeInTheDocument()
 
-      await user.click(within(tabList).getByRole('tab', { name: '聊天' }))
-      const subtabList = document.querySelector('[data-config-bot-subtab-list="true"]') as HTMLElement
+      await selectConfigPage(user, '聊天')
+      const subtabList = document.querySelector(
+        '[data-config-bot-subtab-list="true"]'
+      ) as HTMLElement
       const defaultSubtabNames = within(subtabList)
         .getAllByRole('tab')
         .map((tab) => tab.textContent)
-      expect(defaultSubtabNames).toEqual(['总览', '时机子页', '回复风格'])
+      expect(defaultSubtabNames).toEqual(['总览', '时机子页'])
+      // 回复风格已迁至人格配置，不再列为聊天子页。
+      expect(within(subtabList).queryByRole('tab', { name: '回复风格' })).not.toBeInTheDocument()
 
       await user.click(within(subtabList).getByRole('tab', { name: '时机子页' }))
-      expect(
-        await screen.findByText(/需要按具体聊天流调整发言频率或查看聊天 Prompt/)
-      ).toBeInTheDocument()
-      expect(screen.getByText('聊天管理')).toBeInTheDocument()
+      expect(await screen.findByTestId('form-ReplyTiming-values')).toHaveTextContent('talk_value')
+      expect(screen.queryByText('麦麦聊天')).not.toBeInTheDocument()
 
-      await user.click(within(subtabList).getByRole('button', { name: '更多' }))
+      await user.click(within(subtabList).getByRole('button', { name: '展开更多设置栏目' }))
       expect(within(subtabList).getByRole('tab', { name: '高级文档' })).toBeInTheDocument()
       expect(within(subtabList).getByRole('tab', { name: '内部组' })).toBeInTheDocument()
 
@@ -1222,7 +1210,7 @@ describe('BotConfigPage 特征化', () => {
         'chat_inner,chat_leaf'
       )
 
-      await user.click(within(subtabList).getByRole('button', { name: '收起' }))
+      await user.click(within(subtabList).getByRole('button', { name: '收起设置栏目' }))
       expect(within(subtabList).queryByRole('tab', { name: '内部组' })).not.toBeInTheDocument()
       expect(await screen.findByTestId('form-ChatSectionRoot')).toBeInTheDocument()
     })
@@ -1299,10 +1287,8 @@ describe('BotConfigPage 特征化', () => {
       localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
       await renderBotPage()
 
-      expect(await screen.findByTestId('form-personality')).toBeInTheDocument()
-      await waitFor(() =>
-        expect(scrollToConfigSearchField).toHaveBeenCalledWith('ghost.missing')
-      )
+      expect(await screen.findByTestId('form-bot')).toBeInTheDocument()
+      await waitFor(() => expect(scrollToConfigSearchField).toHaveBeenCalledWith('ghost.missing'))
     })
 
     it('uiParent 成环的字段不会生成 tab，只保留可解析的 host', async () => {
@@ -1313,8 +1299,16 @@ describe('BotConfigPage 特征化', () => {
           fields: [],
           nested: {
             solo: sectionSchema('SoloSection', '单独', { uiLabel: '单独', uiOrder: 0 }),
-            loop_a: sectionSchema('LoopA', '环A', { uiLabel: '环A', uiParent: 'loop_b', uiOrder: 1 }),
-            loop_b: sectionSchema('LoopB', '环B', { uiLabel: '环B', uiParent: 'loop_a', uiOrder: 2 }),
+            loop_a: sectionSchema('LoopA', '环A', {
+              uiLabel: '环A',
+              uiParent: 'loop_b',
+              uiOrder: 1,
+            }),
+            loop_b: sectionSchema('LoopB', '环B', {
+              uiLabel: '环B',
+              uiParent: 'loop_a',
+              uiOrder: 2,
+            }),
           },
         },
       } as never)
@@ -1323,9 +1317,9 @@ describe('BotConfigPage 特征化', () => {
       await renderBotPage()
       await enterDetailMode(user, 'form-solo')
 
-      const tabList = document.querySelector('[data-config-bot-tab-list="true"]') as HTMLElement
+      const tabList = await openConfigMenu(user)
       const tabNames = within(tabList)
-        .getAllByRole('tab')
+        .getAllByRole('menuitem')
         .map((tab) => tab.textContent)
       expect(tabNames).toEqual(['单独'])
     })
@@ -1347,9 +1341,9 @@ describe('BotConfigPage 特征化', () => {
       await renderBotPage()
       await enterDetailMode(user, 'form-alpha')
 
-      const tabList = document.querySelector('[data-config-bot-tab-list="true"]') as HTMLElement
+      const tabList = await openConfigMenu(user)
       const tabNames = within(tabList)
-        .getAllByRole('tab')
+        .getAllByRole('menuitem')
         .map((tab) => tab.textContent)
       expect(tabNames).toEqual(['alpha配置', 'zeta配置'])
     })
@@ -1385,13 +1379,9 @@ describe('BotConfigPage 补充覆盖', () => {
     const user = userEvent.setup()
     await renderBotPage()
     await user.click(screen.getByRole('tab', { name: '详细设置' }))
-    const tabList = await waitFor(() => {
-      const node = document.querySelector('[data-config-bot-tab-list="true"]') as HTMLElement | null
-      if (!node) throw new Error('missing tab list')
-      return node
-    })
+    const tabList = await openConfigMenu(user)
     const tabNames = within(tabList)
-      .getAllByRole('tab')
+      .getAllByRole('menuitem')
       .map((tab) => tab.textContent)
     expect(tabNames).toEqual(['有序', '无序'])
   })
@@ -1406,22 +1396,26 @@ describe('BotConfigPage 补充覆盖', () => {
         variant: 'destructive',
       })
     )
-    expect(await screen.findByRole('tab', { name: '核心设置' })).toBeInTheDocument()
+    expect(await screen.findByRole('tab', { name: '详细设置' })).toBeInTheDocument()
   })
 
   it('分节值为 null 时按空对象展示', async () => {
-    vi.mocked(configApi.getBotConfigCached).mockResolvedValue({
+    const configWithNullPersonality = {
       ...baseConfig(),
       personality: null,
-    })
+    }
+    vi.mocked(configApi.getBotConfigCached).mockResolvedValue(configWithNullPersonality)
+    vi.mocked(configApi.getBotConfig).mockResolvedValue(configWithNullPersonality)
     await renderBotPage()
-    expect(screen.getByTestId('core-personality')).toHaveTextContent('{}')
+    const user = userEvent.setup()
+    await enterDetailMode(user)
+    expect(screen.getByTestId('form-personality-values')).toHaveTextContent('{}')
   })
 
   it('TOML 单行错误会翻译，非 Error 使用兜底文案', async () => {
     const user = userEvent.setup()
     await renderBotPage()
-    await user.click(screen.getByRole('tab', { name: '源文件' }))
+    await selectMoreMode(user, '源文件编辑')
     const editor = await screen.findByPlaceholderText('TOML 配置内容')
     fireEvent.change(editor, { target: { value: 'title = "ok"' } })
 
@@ -1432,7 +1426,10 @@ describe('BotConfigPage 补充覆盖', () => {
       { err: new Error('Invalid boolean'), description: '无效的布尔值（应为 true 或 false）' },
       { err: new Error('Unexpected character'), description: '意外的字符' },
       { err: new Error('unrecognized escape sequence'), description: '无法识别的转义序列' },
-      { err: new Error('Unexpected end of input'), description: '意外的文件结束（可能缺少闭合符号）' },
+      {
+        err: new Error('Unexpected end of input'),
+        description: '意外的文件结束（可能缺少闭合符号）',
+      },
       {
         err: new Error('Error: Invalid TOML document: unrecognized escape sequence'),
         description:
@@ -1477,13 +1474,12 @@ describe('BotConfigPage 补充覆盖', () => {
       { err: 'not-an-error', description: 'TOML 格式错误' },
     ]
 
-    const saveButton = await screen.findByRole('button', { name: '保存' })
     for (const { err, description } of cases) {
       toastMock.mockClear()
       tomlParseOverride = () => {
         throw err
       }
-      await user.click(saveButton)
+      await user.click(await getSaveMenuItem(user))
       await waitFor(() =>
         expect(toastMock).toHaveBeenCalledWith({
           variant: 'destructive',
@@ -1499,12 +1495,12 @@ describe('BotConfigPage 补充覆盖', () => {
     localStorage.setItem('bot-config-file-mode-notice-dismissed', 'true')
     const user = userEvent.setup()
     await renderBotPage()
-    await user.click(screen.getByRole('tab', { name: '源文件' }))
+    await selectMoreMode(user, '源文件编辑')
     const editor = await screen.findByPlaceholderText('TOML 配置内容')
     expect(screen.queryByText('文件模式：')).not.toBeInTheDocument()
 
     fireEvent.change(editor, { target: { value: 'a =' } })
-    await user.click(await screen.findByRole('button', { name: '保存' }))
+    await user.click(await getSaveMenuItem(user))
     expect(await screen.findByText('⚠️ TOML 格式错误：')).toBeInTheDocument()
     expect(screen.queryByText('文件模式：')).not.toBeInTheDocument()
   })
@@ -1518,13 +1514,20 @@ describe('BotConfigPage 补充覆盖', () => {
     await enterDetailMode(user)
 
     await user.click(screen.getByText('change-personality-personality'))
+    await getSaveMenuItem(user)
     await waitFor(
-      () => expect(screen.getByRole('button', { name: '自动保存中' })).toBeDisabled(),
-      { timeout: 4000 }
+      () =>
+        expect(screen.getByRole('menuitem', { name: /手动保存/ })).toHaveAttribute(
+          'aria-disabled',
+          'true'
+        ),
+      {
+        timeout: 4000,
+      }
     )
 
     deferred.resolve({})
-    await screen.findByRole('button', { name: '已保存' })
+    await getSaveMenuItem(user)
   })
 
   it('URL field 仅分节名时不切子页；定位失败也不会抛错', async () => {
@@ -1545,8 +1548,8 @@ describe('BotConfigPage 补充覆盖', () => {
     await renderBotPage()
     await enterDetailMode(user)
 
-    const tabList = document.querySelector('[data-config-bot-tab-list="true"]') as HTMLElement
-    await user.click(within(tabList).getByRole('tab', { name: '机器人' }))
+    const tabList = await openConfigMenu(user)
+    await user.click(within(tabList).getByRole('menuitem', { name: '机器人' }))
     expect(await screen.findByTestId('form-bot')).toBeInTheDocument()
 
     vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
@@ -1589,7 +1592,7 @@ describe('BotConfigPage 补充覆盖', () => {
     await user.click(screen.getByText('change-deep-root-ReplyTiming'))
     expect(screen.getByTestId('form-ReplyTiming-values')).toHaveTextContent('deep-新值')
 
-    await user.click(within(subtabList).getByRole('button', { name: '更多' }))
+    await user.click(within(subtabList).getByRole('button', { name: '展开更多设置栏目' }))
     await user.click(within(subtabList).getByRole('tab', { name: '内部组' }))
     const groupForm = await screen.findByTestId('form-chat_inner.chat_leaf-values')
     const beforeEmpty = groupForm.textContent
@@ -1597,7 +1600,9 @@ describe('BotConfigPage 补充覆盖', () => {
     expect(screen.getByTestId('form-chat_inner.chat_leaf-values').textContent).toBe(beforeEmpty)
 
     await user.click(screen.getByText('change-chat_inner.chat_leaf-chat_inner'))
-    expect(screen.getByTestId('form-chat_inner.chat_leaf-values')).toHaveTextContent('chat_inner-新值')
+    expect(screen.getByTestId('form-chat_inner.chat_leaf-values')).toHaveTextContent(
+      'chat_inner-新值'
+    )
   })
 
   it('子页标签回退到字段名；nested 缺失时仍渲染根子页', async () => {
@@ -1659,14 +1664,14 @@ describe('BotConfigPage 补充覆盖', () => {
     expect(within(subtabList).getByRole('tab', { name: 'mystery' })).toBeInTheDocument()
     expect(within(subtabList).queryByRole('tab', { name: '备注' })).not.toBeInTheDocument()
 
-    await user.click(within(subtabList).getByRole('button', { name: '更多' }))
+    await user.click(within(subtabList).getByRole('button', { name: '展开更多设置栏目' }))
     await user.click(within(subtabList).getByRole('tab', { name: 'chat_inner' }))
     expect(await screen.findByTestId('form-chat_inner.chat_leaf-sections')).toHaveTextContent(
       'chat_inner,chat_leaf'
     )
 
-    const tabList = document.querySelector('[data-config-bot-tab-list="true"]') as HTMLElement
-    await user.click(within(tabList).getByRole('tab', { name: '裸配置' }))
+    const tabList = await openConfigMenu(user)
+    await user.click(within(tabList).getByRole('menuitem', { name: '裸配置' }))
     expect(await screen.findByTestId('form-BareRoot')).toBeInTheDocument()
   })
 
@@ -1702,20 +1707,22 @@ describe('BotConfigPage 补充覆盖', () => {
     await user.click(screen.getByRole('tab', { name: '详细设置' }))
 
     const subtabList = await waitFor(() => {
-      const node = document.querySelector('[data-config-bot-subtab-list="true"]') as HTMLElement | null
+      const node = document.querySelector(
+        '[data-config-bot-subtab-list="true"]'
+      ) as HTMLElement | null
       if (!node) throw new Error('missing subtab list')
       return node
     })
     expect(within(subtabList).queryByRole('tab', { name: '机密页' })).not.toBeInTheDocument()
-    await user.click(within(subtabList).getByRole('button', { name: '更多' }))
+    await user.click(within(subtabList).getByRole('button', { name: '展开更多设置栏目' }))
     expect(within(subtabList).getByRole('tab', { name: '机密页' })).toBeInTheDocument()
     expect(await screen.findByTestId('form-Secret')).toBeInTheDocument()
 
-    await user.click(within(subtabList).getByRole('button', { name: '收起' }))
+    await user.click(within(subtabList).getByRole('button', { name: '收起设置栏目' }))
     expect(within(subtabList).queryByRole('tab', { name: '机密页' })).not.toBeInTheDocument()
   })
 
-  it('全部为高级 tab 时选中后收起仍回退到唯一 tab', async () => {
+  it('全部为高级栏目时关闭菜单保持唯一页面', async () => {
     vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
       schema: {
         className: 'BotConfigRoot',
@@ -1736,17 +1743,12 @@ describe('BotConfigPage 补充覆盖', () => {
     await renderBotPage()
     await user.click(screen.getByRole('tab', { name: '详细设置' }))
 
-    const tabList = await waitFor(() => {
-      const node = document.querySelector('[data-config-bot-tab-list="true"]') as HTMLElement | null
-      if (!node) throw new Error('missing tab list')
-      return node
-    })
-    await user.click(within(tabList).getByRole('button', { name: '更多' }))
-    await user.click(within(tabList).getByRole('tab', { name: '实验性' }))
+    const tabList = await openConfigMenu(user)
+    await user.click(within(tabList).getByRole('menuitem', { name: '实验性' }))
     expect(await screen.findByTestId('form-experimental')).toBeInTheDocument()
 
-    await user.click(within(tabList).getByRole('button', { name: '收起' }))
-    expect(within(tabList).queryByRole('tab', { name: '实验性' })).not.toBeInTheDocument()
+    await openConfigMenu(user)
+    await user.keyboard('{Escape}')
+    expect(screen.getByTestId('form-experimental')).toBeInTheDocument()
   })
 })
-

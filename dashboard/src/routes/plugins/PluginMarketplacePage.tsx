@@ -1,5 +1,5 @@
-﻿import { useEffect, useRef, useState } from 'react'
-import { useNavigate } from '@tanstack/react-router'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate, useSearch } from '@tanstack/react-router'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -32,9 +32,11 @@ import {
 import {
   getCachedPluginStatsSummary,
   getPluginStatsSummary,
+  getPluginUserStates,
   likePlugin,
   recordPluginDownload,
   type PluginStatsData,
+  type PluginVoteState,
 } from '@/lib/plugin-stats'
 import { PLUGIN_MARKET_VIEW_STATE_KEY } from '@/lib/plugin-market-navigation'
 
@@ -83,6 +85,8 @@ const resolvePluginStats = (
 
   return statsIds.map(id => statsSummary[id]).find(Boolean)
 }
+
+type PluginVoteOverlay = PluginVoteState & Partial<Pick<PluginStatsData, 'likes' | 'dislikes'>>
 
 const buildPluginStatsMap = (
   pluginList: PluginInfo[],
@@ -163,7 +167,7 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
   const [marketplaceSortBy, setMarketplaceSortBy] = useState<MarketplaceSortKey>(
     initialViewStateRef.current.marketplaceSortBy
   )
-  const [showCompatibleOnly] = useState(
+  const [showCompatibleOnly, setShowCompatibleOnly] = useState(
     () => localStorage.getItem(PLUGIN_MARKET_COMPATIBLE_ONLY_KEY) !== 'false'
   )
   const [showInstalledPlugins, setShowInstalledPlugins] = useState(initialViewStateRef.current.showInstalledPlugins)
@@ -177,11 +181,48 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
   const [, setInstalledPlugins] = useState<InstalledPlugin[]>([])
   const [pluginStats, setPluginStats] = useState<Record<string, PluginStatsData>>({})
   const [likingPluginIds, setLikingPluginIds] = useState<Set<string>>(() => new Set())
+  // 本机用户的点赞状态与本次会话内的点赞结果，单独存放而不写回 pluginStats：
+  // pluginStats 同时是排序依据，点赞后保持不变才能避免卡片当场换位。
+  const [voteOverlay, setVoteOverlay] = useState<Record<string, PluginVoteOverlay>>({})
+  const displayPluginStats = useMemo(() => {
+    const mergedStats: Record<string, PluginStatsData> = {}
+
+    for (const [statsId, stats] of Object.entries(pluginStats)) {
+      const overlay = voteOverlay[statsId] ?? voteOverlay[stats.plugin_id]
+      mergedStats[statsId] = overlay ? { ...stats, ...overlay } : stats
+    }
+    // 统计摘要里没有记录的插件，点赞后也要能显示点赞数
+    for (const [statsId, overlay] of Object.entries(voteOverlay)) {
+      if (!mergedStats[statsId]) {
+        mergedStats[statsId] = {
+          plugin_id: statsId,
+          likes: 0,
+          dislikes: 0,
+          downloads: 0,
+          rating: 0,
+          rating_count: 0,
+          comment_count: 0,
+          ...overlay,
+        }
+      }
+    }
+
+    return mergedStats
+  }, [pluginStats, voteOverlay])
   
   // 安装对话框状态
   const [installDialogOpen, setInstallDialogOpen] = useState(false)
   const [installingPlugin, setInstallingPlugin] = useState<PluginInfo | null>(null)
-  const [detailPluginId, setDetailPluginId] = useState<string | null>(null)
+  // 详情写入地址，支持从资讯直达，以及刷新后保留当前插件。
+  const search = useSearch({ strict: false }) as { pluginId?: string }
+  const detailPluginId = search.pluginId || null
+  const setDetailPluginId = (pluginId: string | null) => {
+    void navigate({
+      to: embedded ? '/plugins/embed' : '/plugins',
+      search: { pluginId: pluginId || undefined },
+      replace: true,
+    })
+  }
   
   const { toast } = useToast()
   const isFetchingMarketplace = marketplaceProgress?.stage === 'loading'
@@ -212,6 +253,11 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
     localStorage.setItem('plugins-restart-notice-dismissed', 'true')
     setRestartNoticeVisible(false)
   }
+
+  // 「仅显示当前版本」开关：在市场页内直接切换的兼容性筛选偏好，变化后写回 localStorage
+  useEffect(() => {
+    localStorage.setItem(PLUGIN_MARKET_COMPATIBLE_ONLY_KEY, String(showCompatibleOnly))
+  }, [showCompatibleOnly])
 
   useEffect(() => {
     sessionStorage.setItem(
@@ -271,7 +317,7 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
     marketPlugins: PluginInfo[],
     installed: InstalledPlugin[]
   ): PluginInfo[] => {
-    const mergedData = marketPlugins.map(plugin => {
+    const mergedData: PluginInfo[] = marketPlugins.map(plugin => {
       const installedPlugin = installed.find(item => item.id === plugin.id || item.manifest?.id === plugin.id)
       const isInstalled = Boolean(installedPlugin) || checkPluginInstalled(plugin.id, installed)
       const installedVersion = installedPlugin?.manifest?.version ?? getInstalledPluginVersion(plugin.id, installed)
@@ -280,6 +326,7 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
         ...plugin,
         installed: isInstalled,
         installed_version: installedVersion,
+        installed_release: installedPlugin?.release,
       }
     })
 
@@ -335,14 +382,24 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
     let isUnmounted = false
 
     const init = async () => {
-      const cachedPluginList = getCachedPluginList()
+      const cachedPluginList = getCachedPluginList(showCompatibleOnly)
       const cachedStatsSummary = getCachedPluginStatsSummary()
+      // 已点赞状态只影响按钮样式，不阻塞清单加载；本次会话内已产生的点赞结果优先
+      void getPluginUserStates().then((userStates) => {
+        if (!isUnmounted) {
+          setVoteOverlay((currentOverlay) => ({ ...userStates, ...currentOverlay }))
+        }
+      })
       if (cachedPluginList?.length && !isUnmounted) {
         setPlugins(cachedPluginList)
         if (cachedStatsSummary) {
           setPluginStats(buildPluginStatsMap(cachedPluginList, cachedStatsSummary))
         }
         setLoading(false)
+      } else {
+        setPlugins([])
+        setPluginStats({})
+        setLoading(true)
       }
 
       const progressSubscription = connectPluginProgressWebSocket(
@@ -408,11 +465,13 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
             setLoading(true)
           }
           setError(null)
+          // 插件中心的复合列表直接携带统计；GitHub 模式仍单独请求统计摘要。
+          // 清单失败时不等待统计请求，保证错误提示及时返回。
           const [gitStatus, maimaiVersion, marketResult, installed] = await Promise.all([
             checkGitStatus(),
             getMaimaiVersion(),
             // 市场清单失败需保留原有「setError + toast + 中断」行为，故就地收敛为判别结果，避免 Promise.all 整体 reject
-            fetchPluginList()
+            fetchPluginList({ compatibleOnly: showCompatibleOnly })
               .then((data) => ({ ok: true as const, data }))
               .catch((err) => ({ ok: false as const, error: err instanceof Error ? err.message : '加载失败' })),
             getInstalledPlugins(),
@@ -449,16 +508,18 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
             setPluginStats(buildPluginStatsMap(mergedData, cachedStatsSummary))
           }
           setPlugins(mergedData)
-
-          getPluginStatsSummary({ forceRefresh: Boolean(cachedStatsSummary) })
-            .then((statsSummary) => {
-              if (!isUnmounted) {
-                setPluginStats(buildPluginStatsMap(mergedData, statsSummary))
-              }
-            })
-            .catch((statsError) => {
-              console.warn('刷新插件统计失败:', statsError)
-            })
+          const bundledStats = Object.fromEntries(marketResult.data
+            .filter((plugin) => plugin.marketplace_stats)
+            .map((plugin) => [plugin.id, plugin.marketplace_stats!]))
+          // 统计是附加信息；请求失败时明确记录错误，保留已经加载的市场清单。
+          try {
+            const statsSummary = marketResult.data.some((plugin) => plugin.market_data_source === 'service')
+              ? bundledStats
+              : await getPluginStatsSummary({ forceRefresh: Boolean(cachedStatsSummary) })
+            setPluginStats(buildPluginStatsMap(mergedData, statsSummary))
+          } catch (error) {
+            console.warn('刷新插件统计失败:', error)
+          }
         } finally {
           if (!isUnmounted) {
             setLoading(false)
@@ -477,7 +538,7 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
         void unsubscribeProgress()
       }
     }
-  }, [toast])
+  }, [toast, showCompatibleOnly])
 
   // 获取插件状态徽章
   const getStatusBadge = (plugin: PluginInfo) => {
@@ -534,6 +595,8 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
   // 1. manifest_version === 1 的插件在麦麦 >= 1.0.0 时一律视为不兼容（旧 manifest 已不再被宿主接受）；
   // 2. 否则若声明了 host_application 范围，则按版本范围判定。
   const checkPluginCompatibility = (plugin: PluginInfo): boolean => {
+    if (plugin.releases?.sync_error) return false
+    if (plugin.releases?.mode === 'releases') return Boolean(plugin.releases.recommended_version)
     if (!maimaiVersion) return true
 
     // manifest v1 在 1.0.0+ 麦麦上不再兼容
@@ -553,6 +616,8 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
 
   // 不兼容原因（用于 UI 提示）
   const getIncompatibleReason = (plugin: PluginInfo): string | null => {
+    if (plugin.releases?.sync_error) return `版本同步失败：${plugin.releases.sync_error}`
+    if (plugin.releases?.mode === 'releases' && !plugin.releases.recommended_version) return '没有兼容的稳定版本，请在插件详情查看版本列表'
     if (!maimaiVersion) return null
     const manifestVersion = plugin.manifest?.manifest_version ?? 1
     if (manifestVersion <= 1 && maimaiVersion.version_major >= 1) {
@@ -603,6 +668,11 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
 
   // 打开安装对话框
   const openInstallDialog = (plugin: PluginInfo) => {
+    if (plugin.releases?.mode === 'releases') {
+      // 发布版本从详情页选择，分支对话框仅用于尚未采用 Release 的插件。
+      setDetailPluginId(plugin.id)
+      return
+    }
     if (!gitStatus?.installed) {
       toast({
         title: '无法安装',
@@ -661,32 +731,25 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
         return
       }
 
-      setPluginStats((currentStats) => {
-        const currentPluginStats = currentStats[pluginId] ?? currentStats[plugin.id] ?? {
-          plugin_id: pluginId,
-          likes: 0,
-          dislikes: 0,
-          downloads: plugin.downloads ?? 0,
-          rating: plugin.rating ?? 0,
-          rating_count: 0,
-        }
-        const nextPluginStats: PluginStatsData = {
-          ...currentPluginStats,
-          plugin_id: pluginId,
-          likes: Number(result.likes ?? currentPluginStats.likes),
-          dislikes: Number(result.dislikes ?? currentPluginStats.dislikes),
-          liked: result.liked,
-          disliked: result.disliked,
-        }
-        const nextStats = { ...currentStats }
-        const statsIds = [pluginId, plugin.id, plugin.manifest?.id, currentPluginStats.plugin_id]
-          .filter((id): id is string => Boolean(id))
+      const nextOverlay: PluginVoteOverlay = {
+        liked: result.liked === true,
+        disliked: result.disliked === true,
+      }
+      if (result.likes !== undefined) {
+        nextOverlay.likes = Number(result.likes)
+      }
+      if (result.dislikes !== undefined) {
+        nextOverlay.dislikes = Number(result.dislikes)
+      }
+      const statsIds = [pluginId, plugin.manifest?.id, pluginStats[pluginId]?.plugin_id]
+        .filter((id): id is string => Boolean(id))
 
+      setVoteOverlay((currentOverlay) => {
+        const mergedOverlay = { ...currentOverlay }
         for (const statsId of statsIds) {
-          nextStats[statsId] = nextPluginStats
+          mergedOverlay[statsId] = nextOverlay
         }
-
-        return nextStats
+        return mergedOverlay
       })
     } finally {
       setLikingPluginIds((currentIds) => {
@@ -761,7 +824,8 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
             return {
               ...p,
               installed: isInstalled,
-              installed_version: installedVersion
+              installed_version: installedVersion,
+              installed_release: installed.find((item) => item.id === p.id)?.release,
             }
           }
           return p
@@ -815,7 +879,8 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
             return {
               ...p,
               installed: isInstalled,
-              installed_version: installedVersion
+              installed_version: installedVersion,
+              installed_release: installed.find((item) => item.id === p.id)?.release,
             }
           }
           return p
@@ -899,7 +964,8 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
             return {
               ...p,
               installed: isInstalled,
-              installed_version: installedVersion
+              installed_version: installedVersion,
+              installed_release: installed.find((item) => item.id === p.id)?.release,
             }
           }
           return p
@@ -933,6 +999,7 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
       if (!showInstalledPlugins && p.installed) return false
       const matchesSearch = searchQuery === '' ||
         p.manifest.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        p.manifest.author?.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
         p.manifest.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
         (p.manifest.keywords && p.manifest.keywords.some(k => k.toLowerCase().includes(searchQuery.toLowerCase())))
       const matchesType = pluginTypeFilter === 'all' || getPluginType(p) === pluginTypeFilter
@@ -1005,70 +1072,91 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
               />
             </div>
 
-            {/* 类型筛选 */}
-            <Select value={pluginTypeFilter} onValueChange={setPluginTypeFilter}>
-              <SelectTrigger
-                aria-label="类型筛选"
-                title="类型筛选"
-                className="w-full justify-center gap-1 px-2 sm:w-12"
+            {/* 移动端筛选与排序同一行；桌面端展开为父级 flex 项 */}
+            <div className="flex items-center gap-2 sm:contents">
+              {/* 类型筛选 */}
+              <Select value={pluginTypeFilter} onValueChange={setPluginTypeFilter}>
+                <SelectTrigger
+                  aria-label="类型筛选"
+                  title="类型筛选"
+                  className="min-w-0 flex-1 justify-center gap-1 px-2 sm:w-12 sm:flex-none"
+                >
+                  <Filter className="h-4 w-4" />
+                  <span className="sr-only">
+                    <SelectValue placeholder="选择类型" />
+                  </span>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部类型</SelectItem>
+                  {PLUGIN_TYPE_OPTIONS.map(option => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              {/* 排序 */}
+              <Select
+                value={marketplaceSortBy}
+                onValueChange={(value) => setMarketplaceSortBy(value as MarketplaceSortKey)}
               >
-                <Filter className="h-4 w-4" />
-                <span className="sr-only">
-                  <SelectValue placeholder="选择类型" />
-                </span>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部类型</SelectItem>
-                {PLUGIN_TYPE_OPTIONS.map(option => (
-                  <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+                <SelectTrigger
+                  aria-label="排序"
+                  title="排序"
+                  className="min-w-0 flex-1 justify-center gap-1 px-2 sm:w-12 sm:flex-none"
+                >
+                  <ArrowUpDown className="h-4 w-4" />
+                  <span className="sr-only">
+                    <SelectValue placeholder="排序" />
+                  </span>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">推荐排序</SelectItem>
+                  <SelectItem value="latest">最新上架</SelectItem>
+                  <SelectItem value="downloads">下载最多</SelectItem>
+                  <SelectItem value="likes">点赞最多</SelectItem>
+                  <SelectItem value="rating">评分最高</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
 
-            {/* 排序 */}
-            <Select
-              value={marketplaceSortBy}
-              onValueChange={(value) => setMarketplaceSortBy(value as MarketplaceSortKey)}
-            >
-              <SelectTrigger
-                aria-label="排序"
-                title="排序"
-                className="w-full justify-center gap-1 px-2 sm:w-12"
+            {/* 移动端插件数量与设置同一行 */}
+            <div className="flex items-center justify-between gap-2 sm:contents">
+              <Badge
+                variant="outline"
+                data-plugin-market-count-badge="true"
+                className="h-9 border-input bg-transparent px-3 text-sm font-normal"
               >
-                <ArrowUpDown className="h-4 w-4" />
-                <span className="sr-only">
-                  <SelectValue placeholder="排序" />
-                </span>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="default">推荐排序</SelectItem>
-                <SelectItem value="latest">最新上架</SelectItem>
-                <SelectItem value="downloads">下载最多</SelectItem>
-                <SelectItem value="likes">点赞最多</SelectItem>
-                <SelectItem value="rating">评分最高</SelectItem>
-              </SelectContent>
-            </Select>
+                全部插件 {getFilteredPluginCount()}
+              </Badge>
 
-            <Badge
-              variant="outline"
-              data-plugin-market-count-badge="true"
-              className="h-9 border-input bg-transparent px-3 text-sm font-normal"
-            >
-              全部插件 {getFilteredPluginCount()}
-            </Badge>
-
-            <Button
-              type="button"
-              variant="ghost"
-              data-plugin-market-settings-button="true"
-              className="w-full bg-transparent shadow-none hover:bg-transparent sm:ml-auto sm:w-auto"
-              onClick={() => navigate({ to: settingsRoute })}
-            >
-              <Settings2 className="h-4 w-4 mr-2" />
-              设置
-            </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                data-plugin-market-settings-button="true"
+                className="bg-transparent shadow-none hover:bg-transparent sm:ml-auto"
+                onClick={() => navigate({ to: settingsRoute })}
+              >
+                <Settings2 className="h-4 w-4 mr-2" />
+                设置
+              </Button>
+            </div>
 
             {/* 兼容性筛选 */}
+            <div className="flex w-full items-center justify-between gap-3 sm:w-auto sm:min-w-fit sm:flex-col sm:items-center sm:justify-center sm:gap-1">
+              <label
+                htmlFor="compatible-only-plugins"
+                className="cursor-pointer text-xs font-medium leading-none text-muted-foreground whitespace-nowrap"
+              >
+                仅显示当前版本
+              </label>
+              <Switch
+                id="compatible-only-plugins"
+                checked={showCompatibleOnly}
+                onCheckedChange={setShowCompatibleOnly}
+              />
+            </div>
+
+            {/* 已安装筛选 */}
             <div className="flex w-full items-center justify-between gap-3 sm:w-auto sm:min-w-fit sm:flex-col sm:items-center sm:justify-center sm:gap-1">
               <label
                 htmlFor="show-installed-plugins"
@@ -1145,7 +1233,8 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
             sortBy={marketplaceSortBy}
             gitStatus={gitStatus}
             maimaiVersion={maimaiVersion}
-            pluginStats={pluginStats}
+            pluginStats={displayPluginStats}
+            sortPluginStats={pluginStats}
             pluginProgressById={pluginProgressById}
             likingPluginIds={likingPluginIds}
             onInstall={openInstallDialog}
@@ -1176,6 +1265,10 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
                 embedded={embedded}
                 mode="dialog"
                 onClose={() => setDetailPluginId(null)}
+                onInstalledPluginsChange={(installed) => {
+                  setInstalledPlugins(installed)
+                  setPlugins((currentPlugins) => mergeInstalledPluginInfo(currentPlugins, installed))
+                }}
                 pluginId={detailPluginId}
               />
             ) : null}
