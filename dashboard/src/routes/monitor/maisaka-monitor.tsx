@@ -9,6 +9,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   Activity,
   AlertCircle,
+  ArrowLeftRight,
   ArrowRight,
   Bot,
   Brain,
@@ -16,25 +17,39 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Clock,
+  Database,
   Eraser,
   FileCode2,
+  Forward,
   Globe2,
+  History,
+  Hourglass,
   ImageIcon,
   ImageOff,
+  ImagePlus,
+  Images,
   Loader2,
+  MessageCircle,
   PauseCircle,
+  Search,
+  Smile,
   Timer,
+  UserRound,
   Wrench,
   XCircle,
 } from 'lucide-react'
-import type { ReactNode } from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { LucideIcon } from 'lucide-react'
+import type { Key, ReactNode } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -44,6 +59,8 @@ import { backendApi } from '@/lib/http'
 import { cn } from '@/lib/utils'
 
 import type {
+  MaisakaContextSection,
+  MaisakaFinalizedToolResult,
   MaisakaMessageMedia,
   MaisakaToolCall,
   MessageIngestedEvent,
@@ -56,7 +73,7 @@ import type {
   ToolExecutionEvent,
 } from '@/lib/maisaka-monitor-client'
 import type { SessionInfo, StageStatusInfo, TimelineEntry } from './use-maisaka-monitor'
-import { useMaisakaMonitor } from './use-maisaka-monitor'
+import { useMaisakaMonitorOverview, useMaisakaMonitorSession } from './use-maisaka-monitor'
 
 // ─── 工具函数 ──────────────────────────────────────────────────
 
@@ -92,6 +109,39 @@ function getToolCallSourceLabel(source?: string, fallbackLabel?: string): string
   if (normalizedSource === 'reasoning') return '推理中调用'
   if (normalizedSource === 'response') return '正文调用'
   return fallbackLabel?.trim() || ''
+}
+
+/** 内置工具使用各自的图标，其余工具统一用扳手 */
+const BUILTIN_TOOL_ICONS: Record<string, LucideIcon> = {
+  reply: MessageCircle,
+  wait: Hourglass,
+  fetch_history: History,
+  query_memory: Database,
+  query_image_memory: Images,
+  query_person_profile: UserRound,
+  send_emoji: Smile,
+  send_image: ImagePlus,
+  switch_chat: ArrowLeftRight,
+  tool_search: Search,
+  view_forward_message: Forward,
+}
+
+function isMessageTimelineEntry(entry?: TimelineEntry) {
+  return entry?.type === 'message.ingested' || entry?.type === 'message.sent'
+}
+
+function isWaitTool(toolName?: string) {
+  return (toolName ?? '').trim().toLowerCase() === 'wait'
+}
+
+/** wait 为内置工具，只需一句「等待 x 秒」，参数、JSON 与执行结果都不展示 */
+function formatWaitToolText(toolArgs?: Record<string, unknown>) {
+  const seconds = Number(toolArgs?.seconds ?? 30)
+  return `等待 ${Number.isFinite(seconds) ? Math.max(0, Math.trunc(seconds)) : 30} 秒`
+}
+
+function getToolIcon(toolName?: string): LucideIcon {
+  return BUILTIN_TOOL_ICONS[(toolName ?? '').trim().toLowerCase()] ?? Wrench
 }
 
 function getToolCallSourceBadgeClassName(source?: string): string {
@@ -314,23 +364,269 @@ function SessionSidebar({
 
 // ─── 单条时间线事件渲染 ──────────────────────────────────────
 
+/** 上下文分段：token 由该轮真实 prompt token 按字符占比换算 */
+interface MonitorContextSection {
+  key: string
+  tokens: number
+  percent: number
+}
+
 interface MonitorStats {
   messages: number
   cycles: number
   toolCalls: number
+  /** 最近一轮 planner 请求的输入 token，即当前上下文占用 */
+  contextTokens: number
+  /** 与最近一轮 planner 请求对应的上下文分段 */
+  contextSections: MonitorContextSection[]
+  /** 会话累计 token 用量 */
+  totalPromptTokens: number
+  totalCompletionTokens: number
+  /** 会话累计缓存命中率，无缓存数据时为 null */
+  cacheHitRate: number | null
+}
+
+/** 上下文分段的展示标签与配色，未知分段直接以 key 展示 */
+const CONTEXT_SECTION_META: Record<string, { label: string; color: string }> = {
+  messages: { label: '消息', color: 'hsl(var(--color-chart-1))' },
+  mcp_tools: { label: 'MCP 工具', color: 'hsl(var(--color-chart-4))' },
+  builtin_tools: { label: '系统工具', color: 'hsl(var(--color-chart-2))' },
+  plugin_tools: { label: '插件工具', color: 'hsl(var(--primary))' },
+  system_prompt: { label: '系统提示词', color: 'hsl(var(--color-chart-5))' },
+  instant_notice: { label: '即时提示', color: 'hsl(var(--color-chart-3))' },
+  other_tools: { label: '其他工具', color: 'hsl(var(--muted-foreground))' },
+}
+
+function resolveContextSectionMeta(key: string) {
+  return CONTEXT_SECTION_META[key] ?? { label: key, color: 'hsl(var(--muted-foreground))' }
+}
+
+const STATS_TOKEN_FORMATTER = new Intl.NumberFormat('zh-CN', {
+  notation: 'compact',
+  maximumFractionDigits: 1,
+})
+
+function formatTokenCount(value: number): string {
+  return STATS_TOKEN_FORMATTER.format(Math.max(Math.round(value), 0))
+}
+
+/** 统计浮层内的单行指标 */
+function StatsRow({
+  children,
+  value,
+  valueClassName,
+}: {
+  children: ReactNode
+  value: ReactNode
+  valueClassName?: string
+}) {
+  return (
+    <div className="flex items-center gap-2 text-[11px] leading-5">
+      {children}
+      <span className={cn('ml-auto font-mono tabular-nums', valueClassName)}>{value}</span>
+    </div>
+  )
+}
+
+/**
+ * 统计浮层：展示最近一轮上下文构成、缓存命中率与会话累计计数。
+ *
+ * 上下文 token 总量取自模型返回的真实 prompt token，分段占比按后端统计的字符数换算。
+ */
+function MonitorStatsPanel({ stats }: { stats: MonitorStats }) {
+  const hasContext = stats.contextTokens > 0 && stats.contextSections.length > 0
+
+  return (
+    <div className="w-72 space-y-2">
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-xs font-medium">上下文容量</span>
+        <span className="font-mono text-[11px] tabular-nums">
+          {stats.contextTokens > 0 ? `${formatTokenCount(stats.contextTokens)} tokens` : '暂无数据'}
+        </span>
+      </div>
+
+      {hasContext ? (
+        <>
+          <div className="bg-muted flex h-1.5 w-full overflow-hidden rounded-full">
+            {stats.contextSections.map((section) => (
+              <div
+                key={section.key}
+                className="h-full"
+                style={{
+                  width: `${section.percent}%`,
+                  backgroundColor: resolveContextSectionMeta(section.key).color,
+                }}
+              />
+            ))}
+          </div>
+          <div className="space-y-0.5">
+            {stats.contextSections.map((section) => {
+              const sectionMeta = resolveContextSectionMeta(section.key)
+              return (
+                <StatsRow
+                  key={section.key}
+                  value={formatTokenCount(section.tokens)}
+                  valueClassName="text-muted-foreground w-12 text-right"
+                >
+                  <span
+                    className="h-1.5 w-1.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: sectionMeta.color }}
+                  />
+                  <span className="min-w-0 flex-1 truncate">{sectionMeta.label}</span>
+                  <span className="text-muted-foreground w-11 text-right font-mono tabular-nums">
+                    {section.percent.toFixed(1)}%
+                  </span>
+                </StatsRow>
+              )
+            })}
+          </div>
+        </>
+      ) : (
+        <p className="text-muted-foreground text-[11px] leading-5">
+          尚无 planner 请求数据，产生一次推理后展示上下文构成。
+        </p>
+      )}
+
+      <Separator />
+
+      <div className="space-y-0.5">
+        <StatsRow
+          value={stats.cacheHitRate === null ? '—' : `${stats.cacheHitRate.toFixed(0)}%`}
+          valueClassName={stats.cacheHitRate === null ? 'text-muted-foreground' : ''}
+        >
+          <span className="text-muted-foreground">平均缓存命中率</span>
+        </StatsRow>
+        <StatsRow
+          value={`${formatTokenCount(stats.totalPromptTokens)} / ${formatTokenCount(stats.totalCompletionTokens)}`}
+        >
+          <span className="text-muted-foreground">累计输入 / 输出</span>
+        </StatsRow>
+      </div>
+
+      <Separator />
+
+      <div className="space-y-0.5 text-[11px] leading-5">
+        <div>消息：{stats.messages}</div>
+        <div>循环：{stats.cycles}</div>
+        <div>工具调用：{stats.toolCalls}</div>
+      </div>
+    </div>
+  )
 }
 
 interface StageStatusPanelProps {
   autoScroll: boolean
+  sessionId: string | null
   onClearTimeline: () => void
+  onFindPreviousBotMessage: () => void
+  onScrollToTop: () => void
   onScrollToBottom: () => void
   stats: MonitorStats
   status?: StageStatusInfo
 }
 
+interface ChatActiveContext {
+  memory: string[]
+  expressions: string[]
+  jargon: { name: string; meaning: string }[]
+  tools: string[]
+  runtime_active: boolean
+  replyer_timestamp: number | null
+}
+
+function ActiveContextPopover({ sessionId }: { sessionId: string | null }) {
+  const [open, setOpen] = useState(false)
+  const [context, setContext] = useState<ChatActiveContext | null>(null)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    if (!open || !sessionId) return
+    const controller = new AbortController()
+    const load = () => {
+      backendApi
+        .get<ChatActiveContext>('/api/webui/reasoning-process/active-context', {
+          query: { session_id: sessionId },
+          signal: controller.signal,
+        })
+        .then((result) => {
+          if (!controller.signal.aborted) {
+            setContext(result)
+            setError(false)
+          }
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setError(true)
+        })
+    }
+    setContext(null)
+    setError(false)
+    load()
+    const timer = window.setInterval(load, 10000)
+    return () => {
+      controller.abort()
+      window.clearInterval(timer)
+    }
+  }, [open, sessionId])
+
+  const sections = context
+    ? [
+        { title: '回想记忆', items: context.memory, emptyText: '当前聊天流尚未生成回想' },
+        { title: '表达方式', items: context.expressions, emptyText: '最近一次 Replyer 请求中未使用' },
+        { title: '黑话', items: context.jargon.map((entry) => entry.name), emptyText: '当前上下文没有黑话参考' },
+        { title: '激活的工具', items: context.tools, emptyText: '当前尚未激活工具' },
+      ]
+    : []
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="ghost" size="sm" className="h-6 shrink-0 border-0! px-2 text-[11px]" disabled={!sessionId}>
+          <Brain className="mr-1 h-3 w-3" />
+          当前上下文
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" side="bottom" className="max-h-[min(70vh,640px)] w-[min(90vw,480px)] overflow-y-auto p-4">
+        <div className="mb-2 text-sm font-semibold">当前运行的聊天流</div>
+        {error ? <p className="text-muted-foreground text-xs">读取上下文失败</p> : !context ? <p className="text-muted-foreground text-xs">正在读取…</p> : (
+          <div className="space-y-3">
+            {!context.runtime_active && <p className="text-muted-foreground text-xs">当前聊天流未运行</p>}
+            {sections.map((section) => (
+              <section key={section.title}>
+                <h3 className="mb-1 text-xs font-semibold">{section.title} · {section.items.length}</h3>
+                {section.items.length ? section.title === '黑话' ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {section.items.map((item) => (
+                      <Tooltip key={item}>
+                        <TooltipTrigger asChild>
+                          <button type="button" className="bg-muted/50 cursor-help rounded px-2 py-1 text-xs">{item}</button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="z-[70] max-w-sm whitespace-pre-wrap break-words text-xs">
+                          {context.jargon.find((entry) => entry.name === item)?.meaning || '暂无释义'}
+                        </TooltipContent>
+                      </Tooltip>
+                    ))}
+                  </div>
+                ) : section.items.map((item, index) => (
+                  <pre key={`${section.title}-${index}`} className="bg-muted/50 mb-1 whitespace-pre-wrap break-words rounded p-2 font-sans text-xs">{item}</pre>
+                )) : <p className="text-muted-foreground text-xs">{section.emptyText}</p>}
+              </section>
+            ))}
+            <p className="text-muted-foreground text-[11px]">
+              表达方式来自最近一次 Replyer 请求：{context.replyer_timestamp ? new Date(context.replyer_timestamp).toLocaleString() : '无记录'}
+            </p>
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  )
+}
+
 function MonitorStatusActions({
   autoScroll,
+  sessionId,
   onClearTimeline,
+  onFindPreviousBotMessage,
+  onScrollToTop,
   onScrollToBottom,
   stats,
 }: Omit<StageStatusPanelProps, 'status'>) {
@@ -339,33 +635,62 @@ function MonitorStatusActions({
       <TooltipProvider delayDuration={150}>
         <Tooltip>
           <TooltipTrigger asChild>
-            <div className="bg-background/60 text-muted-foreground flex h-6 shrink-0 items-center gap-1 rounded-md border px-1.5">
-              <Activity className="h-3 w-3" />
-              <span className="text-[10px] font-medium">统计</span>
+            <div
+              className={cn(
+                'group bg-background/60 text-muted-foreground flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 transition-colors',
+                // hover / 浮层展开时通过填充色与文字色高亮；主题固定背景色时仍保留图标色反馈。
+                'hover:bg-accent',
+                'data-[state=delayed-open]:bg-accent',
+                'data-[state=instant-open]:bg-accent'
+              )}
+            >
+              <Activity className="group-hover:text-primary h-3 w-3 transition-colors" />
+              <span className="group-hover:text-foreground text-[10px] font-medium transition-colors">
+                统计
+              </span>
             </div>
           </TooltipTrigger>
-          <TooltipContent side="bottom" align="start" className="space-y-1">
-            <div>消息：{stats.messages}</div>
-            <div>循环：{stats.cycles}</div>
-            <div>工具调用：{stats.toolCalls}</div>
+          <TooltipContent side="bottom" align="start" className="p-3">
+            <MonitorStatsPanel stats={stats} />
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
+      <ActiveContextPopover sessionId={sessionId} />
       <div className="ml-auto flex shrink-0 items-center gap-1.5">
         <Button
           variant="ghost"
           size="sm"
-          className="h-6 shrink-0 px-2 text-[11px]"
+          className="h-6 shrink-0 border-0! px-2 text-[11px]"
+          onClick={onScrollToTop}
+          title="回到顶部"
+        >
+          <ChevronUp className="mr-1 h-3 w-3" />
+          顶部
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 shrink-0 border-0! px-2 text-[11px]"
+          onClick={onFindPreviousBotMessage}
+          title="查找上条麦麦消息"
+        >
+          <ChevronUp className="mr-1 h-3 w-3" />
+          上条
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 shrink-0 border-0! px-2 text-[11px]"
           onClick={onScrollToBottom}
           title="回到底部"
         >
           <ChevronDown className={cn('mr-1 h-3 w-3', autoScroll && 'text-primary')} />
-          回到底部
+          底部
         </Button>
         <Button
           variant="ghost"
           size="icon"
-          className="h-6 w-6 shrink-0"
+          className="h-6 w-6 shrink-0 border-0!"
           onClick={onClearTimeline}
           title="清空"
           aria-label="清空"
@@ -379,7 +704,10 @@ function MonitorStatusActions({
 
 function StageStatusPanel({
   autoScroll,
+  sessionId,
   onClearTimeline,
+  onFindPreviousBotMessage,
+  onScrollToTop,
   onScrollToBottom,
   stats,
   status,
@@ -388,7 +716,10 @@ function StageStatusPanel({
   const actions = (
     <MonitorStatusActions
       autoScroll={autoScroll}
+      sessionId={sessionId}
       onClearTimeline={onClearTimeline}
+      onFindPreviousBotMessage={onFindPreviousBotMessage}
+      onScrollToTop={onScrollToTop}
       onScrollToBottom={onScrollToBottom}
       stats={stats}
     />
@@ -396,7 +727,7 @@ function StageStatusPanel({
 
   if (!status) {
     return (
-      <div className="bg-muted/30 mb-1.5 flex min-w-0 items-center gap-2 overflow-x-auto rounded-md border px-2 py-1">
+      <div data-maisaka-toolbar="true" className="bg-muted/30 mb-1.5 flex min-w-0 items-center gap-2 overflow-x-auto rounded-md px-2 py-1">
         {actions}
         <div className="text-muted-foreground shrink-0 text-xs whitespace-nowrap">
           当前聊天流暂无阶段状态
@@ -406,22 +737,22 @@ function StageStatusPanel({
   }
 
   return (
-    <div className="bg-background mb-1.5 flex min-w-0 items-center gap-2 overflow-x-auto rounded-md border px-2 py-1">
+    <div data-maisaka-toolbar="true" className="bg-background mb-1.5 flex min-w-0 items-center gap-2 overflow-x-auto rounded-md px-2 py-1">
       {actions}
       <div className="flex shrink-0 items-center gap-1.5">
-        <Badge variant="default" className="gap-1 px-1.5 text-[10px]">
+        <Badge variant="default" className="gap-1 border-0! px-1.5 text-[10px]">
           <Activity className="h-2.5 w-2.5" />
           {status.stage || '未知阶段'}
         </Badge>
         {status.roundText && (
-          <Badge variant="secondary" className="px-1.5 text-[10px]">
+          <Badge variant="secondary" className="border-0! px-1.5 text-[10px]">
             {status.roundText}
           </Badge>
         )}
         {agentStateLabel && (
           <Badge
             variant={status.agentState === 'running' ? 'default' : 'outline'}
-            className="px-1.5 text-[10px]"
+            className="border-0! px-1.5 text-[10px]"
           >
             {agentStateLabel}
           </Badge>
@@ -504,6 +835,7 @@ function MessageMediaItem({ item }: { item: MaisakaMessageMedia }) {
     showOriginal && !inlineSource ? 'loading' : 'idle'
   )
   const [loadRequestId, setLoadRequestId] = useState(showOriginal && !inlineSource ? 1 : 0)
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false)
   const label = item.kind === 'emoji' ? '表情包' : '图片'
 
   useEffect(() => {
@@ -543,60 +875,86 @@ function MessageMediaItem({ item }: { item: MaisakaMessageMedia }) {
   }, [inlineSource, label, loadRequestId, remoteSource])
 
   return (
-    <button
-      type="button"
-      className={cn(
-        'group bg-muted/40 hover:border-primary/60 hover:bg-muted/70 max-w-full overflow-hidden rounded-md border text-left transition-colors',
-        showOriginal ? 'p-1.5' : 'px-2.5 py-1.5'
-      )}
-      title={`点击切换为${showOriginal ? '识别文本' : '原文件'}`}
-      onClick={() => {
-        if (!canShowOriginal) {
-          return
-        }
-        if (!showOriginal) {
-          if (!inlineSource && !resolvedSource && loadState !== 'loading') {
-            setLoadState('loading')
-            setLoadRequestId((current) => current + 1)
-          }
-        }
-        setShowOriginal((current) => !current)
-      }}
-    >
-      {showOriginal ? (
-        resolvedSource ? (
-          <img
-            src={resolvedSource}
-            alt={`${label}原文件`}
-            className={cn(
-              'block rounded object-contain',
-              item.kind === 'emoji' ? 'max-h-24 max-w-24' : 'max-h-56 max-w-full'
+    <>
+      <div className="relative max-w-full rounded-md">
+        {showOriginal ? (
+          <button
+            type="button"
+            className="focus-visible:ring-ring block max-w-full cursor-zoom-in rounded-md text-left focus-visible:ring-2 disabled:cursor-default"
+            title={`放大查看${label}`}
+            aria-label={`放大查看${label}`}
+            disabled={!resolvedSource}
+            onClick={() => setIsPreviewOpen(true)}
+          >
+            {resolvedSource ? (
+              <img
+                src={resolvedSource}
+                alt={`${label}原文件`}
+                className={cn(
+                  'block rounded object-contain',
+                  item.kind === 'emoji' ? 'max-h-24 max-w-24' : 'max-h-56 max-w-full'
+                )}
+                onError={() => {
+                  setResolvedSource('')
+                  setLoadState('error')
+                }}
+              />
+            ) : loadState === 'error' ? (
+              <span className="text-destructive flex min-h-8 items-center gap-1.5 py-1 pr-9 pl-1 text-xs">
+                <ImageOff className="h-3.5 w-3.5 shrink-0" />
+                原文件读取失败
+              </span>
+            ) : (
+              <span className="text-muted-foreground flex min-h-8 items-center gap-1.5 py-1 pr-9 pl-1 text-xs">
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                正在读取{label}…
+              </span>
             )}
-            onError={() => {
-              setResolvedSource('')
-              setLoadState('error')
-            }}
-          />
-        ) : loadState === 'error' ? (
-          <span className="text-destructive flex min-h-8 items-center gap-1.5 px-1 text-xs">
-            <ImageOff className="h-3.5 w-3.5 shrink-0" />
-            原文件读取失败
-          </span>
+          </button>
         ) : (
-          <span className="text-muted-foreground flex min-h-8 items-center gap-1.5 px-1 text-xs">
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
-            正在读取{label}…
+          <span className="text-muted-foreground flex min-h-8 max-w-sm items-center gap-1.5 py-1 pr-9 text-xs">
+            <ImageIcon className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 break-words whitespace-pre-wrap">
+              {item.text || `[${label}]`}
+            </span>
           </span>
-        )
-      ) : (
-        <span className="text-muted-foreground flex max-w-sm items-center gap-1.5 text-xs">
-          <ImageIcon className="h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0 break-words whitespace-pre-wrap">
-            {item.text || `[${label}]`}
-          </span>
-        </span>
-      )}
-    </button>
+        )}
+        {canShowOriginal && (
+          <button
+            type="button"
+            className={cn(
+              'focus-visible:ring-ring absolute top-1 right-1 flex h-6 w-6 items-center justify-center rounded border text-xs font-medium shadow-sm focus-visible:ring-2',
+              showOriginal ? 'bg-background/90 text-foreground hover:bg-background' : 'bg-primary text-primary-foreground'
+            )}
+            title={`切换为${showOriginal ? '识别文本' : '原文件'}`}
+            aria-label={`切换为${showOriginal ? '识别文本' : '原文件'}`}
+            aria-pressed={!showOriginal}
+            onClick={() => {
+              if (!showOriginal && !inlineSource && !resolvedSource && loadState !== 'loading') {
+                setLoadState('loading')
+                setLoadRequestId((current) => current + 1)
+              }
+              setShowOriginal((current) => !current)
+            }}
+          >
+            文
+          </button>
+        )}
+      </div>
+      <Dialog open={isPreviewOpen} onOpenChange={setIsPreviewOpen}>
+        <DialogContent className="border-0 bg-black/95 p-2 text-white shadow-2xl [--dialog-width:72rem]">
+          <DialogTitle className="sr-only">{label}预览</DialogTitle>
+          <DialogDescription className="sr-only">正在查看放大的{label}。</DialogDescription>
+          <div className="flex max-h-[calc(100vh-3rem)] min-h-0 w-full items-center justify-center">
+            <img
+              src={resolvedSource}
+              alt={`${label}大图`}
+              className="max-h-[calc(100vh-4rem)] max-w-full rounded-md object-contain"
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 
@@ -655,8 +1013,13 @@ function MessageIngestedCard({
           <span className="text-sm font-medium">{data.speaker_name}</span>
           <span className="text-muted-foreground text-xs">{formatTimestamp(data.timestamp)}</span>
         </div>
-        <ReplyPreviewBlock onJumpToMessage={onJumpToMessage} replyTo={data.reply_to} />
-        <MessageMediaContent content={data.content} emptyLabel="[空消息]" media={data.media} />
+        <div
+          data-maisaka-user-bubble="true"
+          className="bg-foreground/[0.07] w-fit max-w-full rounded-lg rounded-tl-none px-3 py-2"
+        >
+          <ReplyPreviewBlock onJumpToMessage={onJumpToMessage} replyTo={data.reply_to} />
+          <MessageMediaContent content={data.content} emptyLabel="[空消息]" media={data.media} />
+        </div>
       </div>
     </div>
   )
@@ -670,18 +1033,24 @@ function MessageSentCard({
   onJumpToMessage: (messageId: string) => void
 }) {
   return (
-    <div className="flex items-start gap-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2">
+    <div className="flex items-start gap-3">
       <MessageAvatar data={data} kind="sent" />
       <div className="min-w-0 flex-1">
         <div className="mb-1 flex items-center gap-2">
           <span className="text-sm font-medium">{data.speaker_name || '麦麦'}</span>
-          <Badge variant="outline" className="text-[10px]">
-            已发送
-          </Badge>
           <span className="text-muted-foreground text-xs">{formatTimestamp(data.timestamp)}</span>
         </div>
-        <ReplyPreviewBlock onJumpToMessage={onJumpToMessage} replyTo={data.reply_to} />
-        <MessageMediaContent content={data.content} emptyLabel="[非文本消息]" media={data.media} />
+        <div
+          data-maisaka-user-bubble="true"
+          className="bg-foreground/[0.07] w-fit max-w-full rounded-lg rounded-tl-none px-3 py-2"
+        >
+          <ReplyPreviewBlock onJumpToMessage={onJumpToMessage} replyTo={data.reply_to} />
+          <MessageMediaContent
+            content={data.content}
+            emptyLabel="[非文本消息]"
+            media={data.media}
+          />
+        </div>
       </div>
     </div>
   )
@@ -841,6 +1210,16 @@ function PlannerResponseCard({ data }: { data: PlannerResponseEvent }) {
   )
 }
 
+function ModelNameBadge({ modelName }: { modelName?: string | null }) {
+  if (!modelName) return null
+
+  return (
+    <Badge variant="outline" className="min-w-0 max-w-full text-[10px] font-normal" title={modelName}>
+      <span className="max-w-64 truncate">模型: {modelName}</span>
+    </Badge>
+  )
+}
+
 function PlannerFinalizedCard({
   data,
   onOpenReasoning,
@@ -853,23 +1232,12 @@ function PlannerFinalizedCard({
   const canOpenReasoning = Boolean(promptHtmlUri && parsePromptHtmlReasoningTarget(promptHtmlUri))
 
   return (
-    <Card className="border-l-4 border-l-emerald-500/60">
-      <CardHeader className="space-y-3 px-4 py-3">
-        <div className="flex flex-wrap items-center gap-2">
+    <Card data-maisaka-trace-card="true" className="border-l-4 border-l-emerald-500/60">
+      <CardHeader className="space-y-2 px-4 py-2">
+        <div data-maisaka-trace-meta="true" className="flex flex-wrap items-center gap-2">
           <Brain className="h-4 w-4 text-emerald-500" />
           <CardTitle className="text-sm font-medium">Planner</CardTitle>
-          {canOpenReasoning && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-2 text-[10px]"
-              onClick={() => onOpenReasoning(promptHtmlUri)}
-              title="在推理过程页查看对应记录"
-            >
-              <FileCode2 className="mr-1 h-3 w-3" />
-              推理
-            </Button>
-          )}
+          <ModelNameBadge modelName={planner?.model_name} />
           <Badge variant="outline" className="ml-auto text-xs font-normal">
             {formatMs(planner?.duration_ms ?? 0)}
           </Badge>
@@ -882,6 +1250,18 @@ function PlannerFinalizedCard({
             <Badge variant="outline" className="text-[10px]">
               {planner.prompt_tokens}+{planner.completion_tokens} tokens
             </Badge>
+          )}
+          {canOpenReasoning && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-[10px]"
+              onClick={() => onOpenReasoning(promptHtmlUri)}
+              title="在推理过程页查看对应记录"
+            >
+              <FileCode2 className="mr-1 h-3 w-3" />
+              推理
+            </Button>
           )}
         </div>
 
@@ -905,6 +1285,163 @@ function formatToolValue(value: unknown) {
   if (typeof value === 'string') return value
   if (value === undefined) return 'undefined'
   return JSON.stringify(value, null, 2)
+}
+
+type DisplayTool = MaisakaFinalizedToolResult & { status?: 'running' | 'pending' }
+
+type MonitorMessage = MessageIngestedEvent | MessageSentEvent
+type ReplyToolMessageProps = {
+  messages?: Map<string, MonitorMessage>
+  onJumpToMessage?: (messageId: string) => void
+}
+
+/** reply 的 at 和附图参数引用的是消息编号，按真实消息解析发送者与媒体。 */
+function ReplyToolArguments({
+  tool,
+  messages,
+  onJumpToMessage,
+}: ReplyToolMessageProps & {
+  tool: DisplayTool
+}) {
+  const args = tool.tool_args ?? {}
+  const messageId = String(args.msg_id ?? '')
+  const message = messages?.get(messageId)
+  const atTargets = Array.isArray(args.attach_at) ? args.attach_at : []
+  const pictures = Array.isArray(args.attach_pic) ? args.attach_pic : []
+  const intentLabels: Record<string, string> = {
+    focus: '表达重点',
+    reply_act: '回复目的',
+    scene: '场景',
+    tone: '语气',
+    prefer: '偏好',
+    avoid: '避免',
+  }
+  const handledArguments = new Set([
+    'msg_id',
+    'attach_at',
+    'attach_pic',
+    'expression_intent',
+    'reply_reference',
+    'set_quote',
+  ])
+
+  return (
+    <div className="space-y-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        {messageId && (
+          <div className="min-w-0 max-w-xl [&>button]:mb-0 [&>div]:mb-0">
+          <ReplyPreviewBlock
+            onJumpToMessage={onJumpToMessage}
+            replyTo={{
+              message_id: messageId,
+              sender_name: message?.speaker_name ?? '',
+              content: message?.content ?? '',
+            }}
+          />
+          </div>
+        )}
+        {atTargets.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-muted-foreground">at 对象：</span>
+            {atTargets.map((target, index) => {
+            const targetId = String(target)
+            return (
+              <button
+                key={`${targetId}-${index}`}
+                type="button"
+                className="text-primary bg-primary/10 hover:bg-primary/20 rounded-md px-2 py-0.5"
+                title={`跳转到目标消息 #${targetId}`}
+                onClick={() => onJumpToMessage?.(targetId)}
+              >
+                @{messages?.get(targetId)?.speaker_name || `消息 #${targetId} 的发送者`}
+              </button>
+            )
+            })}
+          </div>
+        )}
+        {args.set_quote === true && (
+          <span className="shrink-0 rounded-md bg-muted/70 px-2.5 py-1.5 text-xs text-muted-foreground">
+            引用
+          </span>
+        )}
+        {!tool.status && <ToolFullJsonBlock tool={tool} />}
+      </div>
+      {args.expression_intent != null && (
+        <details className="group rounded-md border px-2.5 py-1.5">
+          <summary className="text-muted-foreground flex cursor-pointer list-none items-center gap-1">
+            <ChevronRight className="h-3 w-3 transition-transform group-open:rotate-90" />
+            表达倾向
+          </summary>
+          <div className="mt-2 space-y-1 break-words whitespace-pre-wrap">
+            {typeof args.expression_intent === 'object' && !Array.isArray(args.expression_intent)
+              ? Object.entries(args.expression_intent).map(([name, value]) => (
+                  <div key={name}>
+                    <span className="text-muted-foreground">{intentLabels[name] ?? name}：</span>
+                    {Array.isArray(value)
+                      ? value.map(formatToolValue).join('、')
+                      : formatToolValue(value)}
+                  </div>
+                ))
+              : formatToolValue(args.expression_intent)}
+          </div>
+        </details>
+      )}
+      {typeof args.reply_reference === 'string' && args.reply_reference.trim() && (
+        <div className="bg-muted/50 rounded-md px-2.5 py-2">
+          <span className="text-muted-foreground mb-1 block">回复参考信息</span>
+          <p className="leading-5 break-words whitespace-pre-wrap">
+            {args.reply_reference}
+          </p>
+        </div>
+      )}
+      {pictures.length > 0 && (
+        <div className="space-y-1.5">
+          <span className="text-muted-foreground">附加图片</span>
+          <div className="flex flex-wrap items-start gap-2">
+            {pictures.map((picture, index) => {
+              if (!picture || typeof picture !== 'object') {
+                return <ToolArgumentBlock key={index} name="图片" value={picture} />
+              }
+              const reference = picture as Record<string, unknown>
+              const sourceId = String(reference.msg_id ?? '')
+              const imageIndex = Number(reference.index ?? 0)
+              const sourceMessage = messages?.get(sourceId)
+              // 工具 index 是图片序号，监控媒体的 index 则是原始消息组件序号。
+              const media = sourceMessage?.media?.filter((item) => item.kind === 'image')[
+                imageIndex
+              ]
+              return (
+                <div key={index} className="max-w-sm space-y-1 rounded-md border p-2">
+                  {sourceId ? (
+                    <button
+                      type="button"
+                      className="text-primary hover:underline"
+                      title="跳转到图片来源消息"
+                      onClick={() => onJumpToMessage?.(sourceId)}
+                    >
+                      {sourceMessage?.speaker_name || `消息 #${sourceId}`} · 第 {imageIndex + 1}{' '}
+                      张图片
+                    </button>
+                  ) : (
+                    <p className="break-all">工具媒体：{String(reference.media_index ?? '')}</p>
+                  )}
+                  {media && <MessageMediaItem item={{ ...media, default_original: true }} />}
+                  {sourceId && !media && (
+                    <p className="text-muted-foreground">图片不在当前监控记录中</p>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+      {Object.entries(args)
+        .filter(([name]) => !handledArguments.has(name))
+        .map(([name, value]) => (
+          <ToolArgumentBlock key={name} name={name} value={value} />
+        ))}
+    </div>
+  )
 }
 
 function ToolArgumentBlock({ name, value }: { name: string; value: unknown }) {
@@ -955,7 +1492,7 @@ function ToolFullJsonBlock({
   return (
     <details className="group contents text-xs">
       <summary
-        className="bg-background/40 text-muted-foreground hover:bg-muted/40 ml-auto flex h-6 cursor-pointer list-none items-center gap-1 rounded border border-dashed px-1.5 text-[10px]"
+        className="text-muted-foreground hover:text-foreground ml-auto flex h-6 cursor-pointer list-none items-center gap-1 px-1.5 text-[10px]"
         title="完整调用 JSON"
       >
         <ChevronRight className="h-2.5 w-2.5 shrink-0 transition-transform group-open:rotate-90" />
@@ -968,97 +1505,210 @@ function ToolFullJsonBlock({
   )
 }
 
+function ToolResultImage({ image }: { image: NonNullable<MaisakaFinalizedToolResult['images']>[number] }) {
+  const [failed, setFailed] = useState(false)
+
+  if (failed || image.error || !image.thumbnail_url) {
+    return (
+      <span className="text-muted-foreground flex items-center gap-1.5 text-xs" title={image.label}>
+        <ImageOff className="h-3.5 w-3.5 shrink-0" />
+        {image.error || '图片读取失败'}
+      </span>
+    )
+  }
+
+  return (
+    <img
+      src={image.thumbnail_url}
+      alt={image.label}
+      title={image.label}
+      loading="lazy"
+      decoding="async"
+      referrerPolicy="no-referrer"
+      className="max-h-48 max-w-full rounded-md border object-contain sm:max-w-48"
+      onError={() => setFailed(true)}
+    />
+  )
+}
+
+function ToolResultImages({ images }: { images: MaisakaFinalizedToolResult['images'] }) {
+  if (!images?.length) return null
+
+  return (
+    <div className="flex flex-wrap items-start gap-2 pt-1" aria-label="工具返回图片">
+      {images.map((image, index) => (
+        <ToolResultImage key={index} image={image} />
+      ))}
+    </div>
+  )
+}
+
 function PlannerToolResultCard({
   tool,
   index,
+  hideSourceLabel = false,
+  hideHeader = false,
   onOpenReasoning,
-}: {
-  tool: {
-    duration_ms: number
-    prompt_html_uri?: string
-    success: boolean
-    summary: string
-    tool_args: Record<string, unknown>
-    tool_call_id: string
-    tool_call_source?: string
-    tool_call_source_label?: string
-    tool_name: string
-  }
+  messages,
+  onJumpToMessage,
+}: ReplyToolMessageProps & {
+  tool: DisplayTool
   index: number
+  /** 所有工具来源一致时由卡片右上角统一展示，单条工具不再重复 */
+  hideSourceLabel?: boolean
+  /** 单个工具时名称、耗时与推理入口已合并到卡片标题行 */
+  hideHeader?: boolean
   onOpenReasoning: (promptHtmlUri: string) => void
 }) {
   const argumentEntries = Object.entries(tool.tool_args ?? {})
-  const statusText = tool.success ? '执行成功' : '执行失败'
+  const statusText =
+    tool.status === 'running'
+      ? '执行中'
+      : tool.status === 'pending'
+        ? '等待执行'
+        : tool.success
+          ? '执行成功'
+          : '执行失败'
   const sourceLabel = getToolCallSourceLabel(tool.tool_call_source, tool.tool_call_source_label)
   const promptHtmlUri = tool.prompt_html_uri?.trim() ?? ''
   const canOpenReasoning = Boolean(promptHtmlUri && parsePromptHtmlReasoningTarget(promptHtmlUri))
+  const isToolSearch = tool.tool_name === 'tool_search'
+  const searchQuery = typeof tool.tool_args?.query === 'string' ? tool.tool_args.query : ''
+  const activatedTools = tool.matched_tool_names
+  const newlyDiscoveredTools = new Set(tool.newly_discovered_tool_names)
+
+  if (isWaitTool(tool.tool_name)) {
+    if (hideHeader) return <ToolResultImages images={tool.images} />
+    return (
+      <div className="space-y-1.5">
+        <div data-maisaka-trace-meta="true" className="flex flex-wrap items-center gap-1.5">
+          <Hourglass className="text-muted-foreground h-3.5 w-3.5" />
+          <span className="text-foreground text-sm font-medium">
+            {formatWaitToolText(tool.tool_args)}
+          </span>
+          <span className="text-muted-foreground ml-auto text-[10px]">#{index + 1}</span>
+          {canOpenReasoning && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-1.5 text-[10px]"
+              onClick={() => onOpenReasoning(promptHtmlUri)}
+              title="查看这个工具对应的推理"
+            >
+              <FileCode2 className="mr-1 h-3 w-3" />
+              推理
+            </Button>
+          )}
+        </div>
+        <ToolResultImages images={tool.images} />
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-1.5">
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-foreground font-mono text-sm font-semibold">
-          {tool.tool_name || 'unknown'}
-        </span>
-        {tool.success ? (
-          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-        ) : (
-          <XCircle className="h-3.5 w-3.5 text-red-500" />
-        )}
-        <Badge
-          variant={tool.success ? 'secondary' : 'destructive'}
-          className="h-5 px-1.5 text-[10px]"
-        >
-          {statusText}
-        </Badge>
-        {sourceLabel && (
-          <Badge
-            variant="outline"
-            className={cn(
-              'h-5 px-1.5 text-[10px]',
-              getToolCallSourceBadgeClassName(tool.tool_call_source)
-            )}
-          >
-            {sourceLabel}
-          </Badge>
-        )}
-        {tool.duration_ms > 0 && (
-          <span className="text-muted-foreground text-xs font-medium">
-            {formatMs(tool.duration_ms)}
+      {!hideHeader && (
+        <div data-maisaka-trace-meta="true" className="flex flex-wrap items-center gap-1.5">
+          <span className="text-foreground font-mono text-sm font-semibold">
+            {tool.tool_name || 'unknown'}
           </span>
-        )}
-        {canOpenReasoning && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-1.5 text-[10px]"
-            onClick={() => onOpenReasoning(promptHtmlUri)}
-            title="查看这个工具对应的推理"
-          >
-            <FileCode2 className="mr-1 h-3 w-3" />
-            推理
-          </Button>
-        )}
-        <span className="text-muted-foreground ml-auto text-[10px]">#{index + 1}</span>
-      </div>
+          <ModelNameBadge modelName={tool.model_name} />
+          {tool.status && (
+            <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">
+              {statusText}
+            </Badge>
+          )}
+          {!tool.status && !tool.success && (
+            <>
+              <XCircle className="h-3.5 w-3.5 text-red-500" />
+              <Badge variant="destructive" className="h-5 px-1.5 text-[10px]">
+                {statusText}
+              </Badge>
+            </>
+          )}
+          {sourceLabel && !hideSourceLabel && (
+            <Badge
+              variant="outline"
+              className={cn(
+                'h-5 px-1.5 text-[10px]',
+                getToolCallSourceBadgeClassName(tool.tool_call_source)
+              )}
+            >
+              {sourceLabel}
+            </Badge>
+          )}
+          {tool.duration_ms > 0 && (
+            <span className="text-muted-foreground text-xs font-medium">
+              {formatMs(tool.duration_ms)}
+            </span>
+          )}
+          <span className="text-muted-foreground ml-auto text-[10px]">#{index + 1}</span>
+          {canOpenReasoning && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-1.5 text-[10px]"
+              onClick={() => onOpenReasoning(promptHtmlUri)}
+              title="查看这个工具对应的推理"
+            >
+              <FileCode2 className="mr-1 h-3 w-3" />
+              推理
+            </Button>
+          )}
+        </div>
+      )}
 
       <div className="space-y-1.5">
-        {argumentEntries.length > 0 && (
+        {isToolSearch && searchQuery && (
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-muted-foreground">搜索工具：</span>
+            <span className="text-foreground font-mono">{searchQuery}</span>
+            {!tool.status && <ToolFullJsonBlock tool={tool} />}
+          </div>
+        )}
+        {tool.tool_name === 'reply' && (
+          <ReplyToolArguments tool={tool} messages={messages} onJumpToMessage={onJumpToMessage} />
+        )}
+        {!isToolSearch && tool.tool_name !== 'reply' && argumentEntries.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5">
             {argumentEntries.map(([name, value]) => (
               <ToolArgumentBlock key={name} name={name} value={value} />
             ))}
-            <ToolFullJsonBlock tool={tool} />
+            {!tool.status && <ToolFullJsonBlock tool={tool} />}
           </div>
         )}
 
-        <div className="bg-muted/20 flex items-start gap-1.5 rounded-md border px-2.5 py-1">
-          <span className="text-muted-foreground shrink-0 text-[10px] leading-4 font-medium">
-            执行结果
-          </span>
-          <p className="text-foreground/80 min-w-0 flex-1 text-xs leading-4 break-words whitespace-pre-wrap">
-            {tool.summary || '未返回结果摘要。'}
-          </p>
-        </div>
+        {!tool.status && isToolSearch && tool.success && activatedTools ? (
+          <div className="flex flex-wrap items-start gap-x-2 text-xs">
+            <span className="text-muted-foreground shrink-0">激活工具：</span>
+            {activatedTools.length > 0 ? (
+              <div className="flex flex-col gap-0.5">
+                {activatedTools.map((name) => (
+                  <div key={name} className="flex flex-wrap items-center gap-2">
+                    <span className="text-foreground font-mono">{name}</span>
+                    <span className="text-muted-foreground text-[10px]">
+                      {newlyDiscoveredTools.has(name) ? '本次新发现' : '此前已发现'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <span className="text-muted-foreground">未找到匹配工具</span>
+            )}
+          </div>
+        ) : (
+          !tool.status && (
+            <div className="flex flex-wrap items-baseline gap-x-1.5">
+              <span className="text-muted-foreground shrink-0 text-[10px] leading-4 font-medium">
+                执行结果
+              </span>
+              <p className="text-muted-foreground min-w-0 flex-1 text-xs leading-4 break-words whitespace-pre-wrap">
+                {tool.summary || '未返回结果摘要。'}
+              </p>
+            </div>
+          )
+        )}
+        <ToolResultImages images={tool.images} />
       </div>
     </div>
   )
@@ -1066,17 +1716,20 @@ function PlannerToolResultCard({
 
 function PlannerToolCallsBlock({
   data,
+  isProgress,
   onOpenReasoning,
-}: {
+  messages,
+  onJumpToMessage,
+}: ReplyToolMessageProps & {
   data: PlannerFinalizedEvent
+  isProgress: boolean
   onOpenReasoning: (promptHtmlUri: string) => void
 }) {
   const toolCalls = data.planner?.tool_calls ?? []
   const tools = data.tools ?? []
-  const displayTools =
-    tools.length > 0
-      ? tools
-      : toolCalls.map((toolCall) => ({
+  const completedTools = new Map(tools.map((tool) => [tool.tool_call_id, tool]))
+  const displayTools: DisplayTool[] = isProgress
+      ? toolCalls.map((toolCall) => completedTools.get(toolCall.id) ?? ({
           tool_call_id: toolCall.id,
           tool_name: toolCall.name,
           tool_args: toolCall.arguments ?? {},
@@ -1085,18 +1738,52 @@ function PlannerToolCallsBlock({
           success: true,
           duration_ms: 0,
           summary: '',
+          status: data.active_tool_call_id === toolCall.id ? 'running' : 'pending',
         }))
+      : tools.length > 0
+        ? tools
+        : toolCalls.map((toolCall) => ({
+            tool_call_id: toolCall.id,
+            tool_name: toolCall.name,
+            tool_args: toolCall.arguments ?? {},
+            tool_call_source: toolCall.source,
+            tool_call_source_label: toolCall.source_label,
+            success: true,
+            duration_ms: 0,
+            summary: '',
+          }))
   const isFinishTool = (toolName?: string) => toolName?.trim().toLowerCase() === 'finish'
   const finishTools = displayTools.filter((tool) => isFinishTool(tool.tool_name))
-  const regularTools = displayTools.filter((tool) => !isFinishTool(tool.tool_name))
+  const regularTools = displayTools.filter(
+    (tool) => !isFinishTool(tool.tool_name) || tool.status || tool.images?.length
+  )
   const plannerStopped =
-    finishTools.length > 0 || data.final_state.end_reason === 'tool_stop_after_execution'
+    finishTools.some((tool) => !tool.status) ||
+    data.final_state.end_reason === 'tool_stop_after_execution'
+  const sharedSource = regularTools[0]?.tool_call_source
+  const sharedSourceLabel =
+    regularTools.length > 0 &&
+    regularTools.every(
+      (tool) =>
+        tool.tool_call_source === sharedSource &&
+        getToolCallSourceLabel(tool.tool_call_source, tool.tool_call_source_label) ===
+          getToolCallSourceLabel(sharedSource, regularTools[0].tool_call_source_label)
+    )
+      ? getToolCallSourceLabel(sharedSource, regularTools[0].tool_call_source_label)
+      : ''
+  const singleTool = regularTools.length === 1 ? regularTools[0] : null
+  const ToolIcon = singleTool ? getToolIcon(singleTool.tool_name) : Wrench
+  const singleToolIsWait = Boolean(singleTool && isWaitTool(singleTool.tool_name))
+  const singleToolPromptHtmlUri = singleTool?.prompt_html_uri?.trim() ?? ''
+  const canOpenSingleToolReasoning = Boolean(
+    singleToolPromptHtmlUri && parsePromptHtmlReasoningTarget(singleToolPromptHtmlUri)
+  )
 
   if (displayTools.length <= 0) {
     return null
   }
 
-  if (regularTools.length <= 0 && finishTools.length > 0) {
+  if (regularTools.length <= 0 && finishTools.length > 0 && plannerStopped) {
     return (
       <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2">
         <div className="flex items-center gap-2 text-sm">
@@ -1109,14 +1796,64 @@ function PlannerToolCallsBlock({
   }
 
   return (
-    <Card className="border-l-4 border-l-teal-500/60">
-      <CardHeader className="space-y-2 px-4 py-3">
-        <div className="flex items-center gap-2">
-          <Wrench className="h-4 w-4 text-teal-500" />
-          <CardTitle className="text-sm font-medium">使用工具</CardTitle>
-          <Badge variant="secondary" className="ml-auto text-[10px]">
-            {regularTools.length} 个
-          </Badge>
+    <Card data-maisaka-trace-card="true" className="border-l-4 border-l-teal-500/60">
+      <CardHeader className="space-y-2 px-4 py-2">
+        <div data-maisaka-trace-meta="true" className="flex flex-wrap items-center gap-2">
+          <ToolIcon className="h-4 w-4 text-teal-500" />
+          <CardTitle
+            className={cn('text-sm font-semibold', !singleToolIsWait && 'font-mono')}
+          >
+            {singleToolIsWait
+              ? formatWaitToolText(singleTool?.tool_args)
+              : regularTools.map((tool) => tool.tool_name || 'unknown').join('、')}
+          </CardTitle>
+          <ModelNameBadge modelName={singleTool?.model_name} />
+          {singleTool?.status && (
+            <Badge variant="secondary" className="px-1.5 text-[10px]">
+              {singleTool.status === 'running' ? '执行中' : '等待执行'}
+            </Badge>
+          )}
+          {singleTool && !singleTool.status && !singleTool.success && (
+            <Badge variant="destructive" className="px-1.5 text-[10px]">
+              执行失败
+            </Badge>
+          )}
+          {singleTool && !singleToolIsWait && singleTool.duration_ms > 0 && (
+            <span className="text-muted-foreground text-xs font-medium">
+              {formatMs(singleTool.duration_ms)}
+            </span>
+          )}
+          {sharedSourceLabel && (
+            <Badge
+              variant="outline"
+              className={cn(
+                'ml-auto px-1.5 text-[10px]',
+                getToolCallSourceBadgeClassName(sharedSource)
+              )}
+            >
+              {sharedSourceLabel}
+            </Badge>
+          )}
+          {!singleTool && (
+            <Badge
+              variant="secondary"
+              className={cn('text-[10px]', !sharedSourceLabel && 'ml-auto')}
+            >
+              {regularTools.length} 个
+            </Badge>
+          )}
+          {canOpenSingleToolReasoning && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn('h-6 px-1.5 text-[10px]', !sharedSourceLabel && 'ml-auto')}
+              onClick={() => onOpenReasoning(singleToolPromptHtmlUri)}
+              title="查看这个工具对应的推理"
+            >
+              <FileCode2 className="mr-1 h-3 w-3" />
+              推理
+            </Button>
+          )}
         </div>
         {plannerStopped && (
           <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-1.5 text-xs">
@@ -1125,14 +1862,24 @@ function PlannerToolCallsBlock({
             <span className="text-muted-foreground">等待新的消息。</span>
           </div>
         )}
+        {(!singleToolIsWait || Boolean(singleTool?.images?.length)) && (
         <div className="space-y-2">
           {regularTools.map((tool, idx) => (
             <div key={`${tool.tool_call_id || tool.tool_name}-${idx}`} className="space-y-2">
               {idx > 0 && <Separator />}
-              <PlannerToolResultCard tool={tool} index={idx} onOpenReasoning={onOpenReasoning} />
+              <PlannerToolResultCard
+                messages={messages}
+                onJumpToMessage={onJumpToMessage}
+                tool={tool}
+                index={idx}
+                hideSourceLabel={Boolean(sharedSourceLabel)}
+                hideHeader={Boolean(singleTool)}
+                onOpenReasoning={onOpenReasoning}
+              />
             </div>
           ))}
         </div>
+        )}
       </CardHeader>
     </Card>
   )
@@ -1145,9 +1892,9 @@ function PlannerNativeToolCallsBlock({ data }: { data: PlannerFinalizedEvent }) 
   }
 
   return (
-    <Card className="border-l-4 border-l-sky-500/60">
-      <CardHeader className="space-y-2 px-4 py-3">
-        <div className="flex items-center gap-2">
+    <Card data-maisaka-trace-card="true" className="border-l-4 border-l-sky-500/60">
+      <CardHeader className="space-y-2 px-4 py-2">
+        <div data-maisaka-trace-meta="true" className="flex items-center gap-2">
           <Globe2 className="h-4 w-4 text-sky-500" />
           <CardTitle className="text-sm font-medium">Provider 原生工具</CardTitle>
           <Badge variant="secondary" className="ml-auto text-[10px]">
@@ -1290,9 +2037,9 @@ function CollapsibleText({
 
 function ReplierResponseCard({ data }: { data: ReplierResponseEvent }) {
   return (
-    <Card className="border-l-4 border-l-purple-500/60">
-      <CardHeader className="space-y-2 px-4 py-2.5">
-        <div className="flex items-center gap-2">
+    <Card data-maisaka-trace-card="true" className="border-l-4 border-l-purple-500/60">
+      <CardHeader className="space-y-2 px-4 py-2">
+        <div data-maisaka-trace-meta="true" className="flex items-center gap-2">
           <Bot className="h-4 w-4 text-purple-500" />
           <CardTitle className="text-sm font-medium">回复器响应</CardTitle>
           <Badge variant="outline" className="ml-auto text-xs font-normal">
@@ -1343,8 +2090,10 @@ function TimelineEventRenderer({
   entry,
   onJumpToMessage,
   onOpenReasoning,
+  messages,
 }: {
   entry: TimelineEntry
+  messages?: Map<string, MonitorMessage>
   onJumpToMessage: (messageId: string) => void
   onOpenReasoning: (promptHtmlUri: string) => void
 }) {
@@ -1365,6 +2114,7 @@ function TimelineEventRenderer({
     case 'planner.response':
       return <PlannerResponseCard data={entry.data as PlannerResponseEvent} />
     case 'planner.finalized':
+    case 'planner.progress':
       if (isPlannerInterrupted(entry.data as PlannerFinalizedEvent)) {
         return <PlannerInterruptedCard data={entry.data as PlannerFinalizedEvent} />
       }
@@ -1379,7 +2129,10 @@ function TimelineEventRenderer({
           />
           <PlannerNativeToolCallsBlock data={entry.data as PlannerFinalizedEvent} />
           <PlannerToolCallsBlock
+            messages={messages}
+            onJumpToMessage={onJumpToMessage}
             data={entry.data as PlannerFinalizedEvent}
+            isProgress={entry.type === 'planner.progress'}
             onOpenReasoning={onOpenReasoning}
           />
         </div>
@@ -1403,29 +2156,24 @@ interface MaisakaMonitorProps {
   reasoningReturnTo?: string
 }
 
-export function MaisakaMonitor({ embedded = false, reasoningReturnTo }: MaisakaMonitorProps = {}) {
+const MonitorTimeline = memo(function MonitorTimeline({
+  embedded = false,
+  reasoningReturnTo,
+}: MaisakaMonitorProps) {
   const navigate = useNavigate()
   const { toast } = useToast()
-  const {
-    timeline,
-    sessions,
-    stageStatuses,
-    selectedSession,
-    setSelectedSession,
-    connected,
-    clearTimeline,
-  } = useMaisakaMonitor()
+  const { timeline, selectedSession, selectedStageStatus, clearTimeline } = useMaisakaMonitorSession()
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const [scrollViewport, setScrollViewport] = useState<HTMLDivElement | null>(null)
   const [autoScroll, setAutoScroll] = useState(true)
   const [focusedMessageId, setFocusedMessageId] = useState<string | null>(null)
   const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 程序化跳转滚动期间忽略滚动监听，防止自动跟随把视图拉回底部 */
+  const revealScrollLockRef = useRef(false)
   const previousSelectedSessionRef = useRef<string | null | undefined>(undefined)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    const saved = localStorage.getItem('maisaka-monitor-sidebar-collapsed')
-    return saved !== 'false'
-  })
+  /** 用户向上浏览时记录视口顶部的锚点条目，列表变化后据此恢复位置，避免内容被顶走 */
+  const scrollAnchorRef = useRef<{ key: Key; offset: number } | null>(null)
 
   const handleOpenReasoning = useCallback(
     (promptHtmlUri: string) => {
@@ -1444,10 +2192,6 @@ export function MaisakaMonitor({ embedded = false, reasoningReturnTo }: MaisakaM
     },
     [navigate, reasoningReturnTo]
   )
-
-  useEffect(() => {
-    localStorage.setItem('maisaka-monitor-sidebar-collapsed', String(sidebarCollapsed))
-  }, [sidebarCollapsed])
 
   useEffect(
     () => () => {
@@ -1479,7 +2223,7 @@ export function MaisakaMonitor({ embedded = false, reasoningReturnTo }: MaisakaM
         continue
       }
 
-      if (entry.type === 'planner.response' || entry.type === 'planner.finalized') {
+      if (entry.type === 'planner.response' || entry.type === 'planner.finalized' || entry.type === 'planner.progress') {
         const data = entry.data as PlannerResponseEvent | PlannerFinalizedEvent
         const cycleKey = buildCycleKey(data.session_id, data.cycle_id)
         if (
@@ -1533,6 +2277,40 @@ export function MaisakaMonitor({ embedded = false, reasoningReturnTo }: MaisakaM
     return indexes
   }, [visibleTimelineEntries])
 
+  const monitorMessages = useMemo(() => {
+    const messages = new Map<string, MonitorMessage>()
+    visibleTimelineEntries.forEach((entry) => {
+      if (isMessageTimelineEntry(entry)) {
+        const message = entry.data as MonitorMessage
+        messages.set(message.message_id, message)
+      }
+    })
+    return messages
+  }, [visibleTimelineEntries])
+
+  /** 滚动到指定时间线位置，并短暂高亮该条消息（供消息跳转与“查找上条”共用） */
+  const revealTimelineMessage = useCallback(
+    (targetIndex: number, messageId: string) => {
+      setAutoScroll(false)
+      // 平滑滚动的开头几帧仍在底部阈值内，锁住滚动监听，避免被当成“用户回到底部”而拉回底部
+      revealScrollLockRef.current = true
+      setFocusedMessageId(messageId)
+      timelineVirtualizer.scrollToIndex(targetIndex, {
+        align: 'center',
+        behavior: 'smooth',
+      })
+      if (focusTimerRef.current !== null) {
+        clearTimeout(focusTimerRef.current)
+      }
+      focusTimerRef.current = setTimeout(() => {
+        setFocusedMessageId(null)
+        revealScrollLockRef.current = false
+        focusTimerRef.current = null
+      }, 1800)
+    },
+    [timelineVirtualizer]
+  )
+
   const handleJumpToMessage = useCallback(
     (messageId: string) => {
       const targetIndex = messageEntryIndexes.get(messageId)
@@ -1545,22 +2323,36 @@ export function MaisakaMonitor({ embedded = false, reasoningReturnTo }: MaisakaM
         return
       }
 
-      setAutoScroll(false)
-      setFocusedMessageId(messageId)
-      timelineVirtualizer.scrollToIndex(targetIndex, {
-        align: 'center',
-        behavior: 'smooth',
-      })
-      if (focusTimerRef.current !== null) {
-        clearTimeout(focusTimerRef.current)
-      }
-      focusTimerRef.current = setTimeout(() => {
-        setFocusedMessageId(null)
-        focusTimerRef.current = null
-      }, 1800)
+      revealTimelineMessage(targetIndex, messageId)
     },
-    [messageEntryIndexes, timelineVirtualizer, toast]
+    [messageEntryIndexes, revealTimelineMessage, toast]
   )
+
+  /** 向上查找当前视口上方最近一条麦麦自己发送的消息并滚动过去 */
+  const handleFindPreviousBotMessage = useCallback(() => {
+    const viewportTop = scrollViewport?.scrollTop ?? 0
+    // 虚拟列表带 overscan，按行位置过滤出视口内第一行，避免选中视口上方的预渲染行
+    const firstVisibleIndex =
+      timelineVirtualizer.getVirtualItems().find((item) => item.end > viewportTop)?.index ?? 0
+
+    for (let index = firstVisibleIndex - 1; index >= 0; index -= 1) {
+      const entry = visibleTimelineEntries[index]
+      if (entry?.type !== 'message.sent') {
+        continue
+      }
+      const data = entry.data as MessageSentEvent
+      if (!data.message_id) {
+        continue
+      }
+      revealTimelineMessage(index, data.message_id)
+      return
+    }
+
+    toast({
+      title: '上方没有更多麦麦发送的消息',
+      description: '已经到达当前时间线里麦麦发送消息的最上方。',
+    })
+  }, [revealTimelineMessage, scrollViewport, timelineVirtualizer, toast, visibleTimelineEntries])
 
   const scrollToBottom = useCallback(
     (behavior: TimelineScrollBehavior = 'smooth') => {
@@ -1579,6 +2371,16 @@ export function MaisakaMonitor({ embedded = false, reasoningReturnTo }: MaisakaM
     },
     [scrollViewport, timelineVirtualizer, visibleTimelineEntries.length]
   )
+
+  const scrollToTop = useCallback(() => {
+    setAutoScroll(false)
+    revealScrollLockRef.current = true
+    if (visibleTimelineEntries.length > 0) {
+      timelineVirtualizer.scrollToIndex(0, { align: 'start', behavior: 'smooth' })
+    } else {
+      scrollViewport?.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }, [scrollViewport, timelineVirtualizer, visibleTimelineEntries.length])
 
   // 自动滚动到底部
   useEffect(() => {
@@ -1602,37 +2404,276 @@ export function MaisakaMonitor({ embedded = false, reasoningReturnTo }: MaisakaM
         scrollViewport ?? e.currentTarget.querySelector('[data-radix-scroll-area-viewport]')
       if (!target) return
       const { scrollTop, scrollHeight, clientHeight } = target as HTMLElement
-      setAutoScroll(scrollHeight - scrollTop - clientHeight < 80)
+      const distanceToBottom = scrollHeight - scrollTop - clientHeight
+
+      // 程序化跳转期间：平滑滚动的起始帧仍在底部阈值内，
+      // 此时既不能重新开启自动跟随（会打断滚动并拉回底部），也不需要关闭
+      if (revealScrollLockRef.current) {
+        if (distanceToBottom < 80) return
+        // 已经离开底部阈值，恢复正常判定
+        revealScrollLockRef.current = false
+      }
+
+      const anchorItem = timelineVirtualizer.getVirtualItems().find((item) => item.end > scrollTop)
+      scrollAnchorRef.current = anchorItem
+        ? { key: anchorItem.key, offset: scrollTop - anchorItem.start }
+        : null
+
+      setAutoScroll(distanceToBottom < 80)
     },
-    [scrollViewport]
+    [scrollViewport, timelineVirtualizer]
   )
 
-  // 统计当前会话的各事件类型计数
-  const stats = useMemo(
-    () =>
-      timeline.reduce<MonitorStats>(
-        (currentStats, entry) => {
-          if (entry.type === 'message.ingested' || entry.type === 'message.sent') {
-            currentStats.messages += 1
-            return currentStats
-          }
-          if (entry.type === 'planner.finalized') {
-            currentStats.cycles += 1
-            currentStats.toolCalls += (entry.data as PlannerFinalizedEvent).tools?.length ?? 0
-            return currentStats
-          }
-          if (entry.type === 'tool.execution') {
-            currentStats.toolCalls += 1
-          }
-          return currentStats
-        },
-        { messages: 0, cycles: 0, toolCalls: 0 }
-      ),
-    [timeline]
-  )
-  const selectedStageStatus = selectedSession ? stageStatuses.get(selectedSession) : undefined
+  // 未跟随底部时，时间线头部被裁剪或上方插入新条目都会改变锚点条目的位置；
+  // 在绘制前把滚动位置补偿回去，保持用户正在浏览的内容不动
+  useLayoutEffect(() => {
+    if (autoScroll || !scrollViewport || revealScrollLockRef.current) return
+    const anchor = scrollAnchorRef.current
+    if (!anchor) return
+    const anchorItem = timelineVirtualizer.measurementsCache.find((item) => item.key === anchor.key)
+    if (!anchorItem) return
+    const targetTop = anchorItem.start + anchor.offset
+    if (Math.abs(scrollViewport.scrollTop - targetTop) > 1) {
+      scrollViewport.scrollTop = targetTop
+    }
+  }, [autoScroll, scrollViewport, timelineVirtualizer, visibleTimelineEntries])
+
+  // 统计当前会话的各事件类型计数，以及上下文构成与缓存命中情况
+  const stats = useMemo(() => {
+    const currentStats: MonitorStats = {
+      messages: 0,
+      cycles: 0,
+      toolCalls: 0,
+      contextTokens: 0,
+      contextSections: [],
+      totalPromptTokens: 0,
+      totalCompletionTokens: 0,
+      cacheHitRate: null,
+    }
+    let cacheHitTokens = 0
+    let cacheMissTokens = 0
+    // 最近一轮带上下文分段统计的请求
+    let latestSections: MaisakaContextSection[] = []
+
+    for (const entry of timeline) {
+      if (entry.type === 'message.ingested' || entry.type === 'message.sent') {
+        currentStats.messages += 1
+        continue
+      }
+      if (entry.type === 'tool.execution') {
+        currentStats.toolCalls += 1
+        continue
+      }
+      if (entry.type !== 'planner.finalized') {
+        continue
+      }
+
+      currentStats.cycles += 1
+      const finalized = entry.data as PlannerFinalizedEvent
+      currentStats.toolCalls += finalized.tools?.length ?? 0
+      const planner = finalized.planner
+      if (!planner) {
+        continue
+      }
+
+      currentStats.totalPromptTokens += planner.prompt_tokens
+      currentStats.totalCompletionTokens += planner.completion_tokens
+      cacheHitTokens += planner.prompt_cache_hit_tokens ?? 0
+      cacheMissTokens += planner.prompt_cache_miss_tokens ?? 0
+      // 以最近一轮真实请求代表当前上下文
+      if (planner.prompt_tokens > 0 && finalized.request?.context_sections?.length) {
+        currentStats.contextTokens = planner.prompt_tokens
+        latestSections = finalized.request.context_sections
+      }
+    }
+
+    const cacheTotalTokens = cacheHitTokens + cacheMissTokens
+    if (cacheTotalTokens > 0) {
+      currentStats.cacheHitRate = (cacheHitTokens / cacheTotalTokens) * 100
+    }
+
+    const totalChars = latestSections.reduce((sum, section) => sum + section.chars, 0)
+    if (currentStats.contextTokens > 0 && totalChars > 0) {
+      // 按字符占比把真实 token 总量分摊到各分段，占比大的分段优先展示
+      currentStats.contextSections = latestSections
+        .filter((section) => section.chars > 0)
+        .map((section) => ({
+          key: section.key,
+          tokens: (currentStats.contextTokens * section.chars) / totalChars,
+          percent: (section.chars / totalChars) * 100,
+        }))
+        .sort((a, b) => b.percent - a.percent)
+    }
+
+    return currentStats
+  }, [timeline])
   const virtualItems = timelineVirtualizer.getVirtualItems()
 
+  // 主时间线区域
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* 时间线 */}
+      <StageStatusPanel
+        autoScroll={autoScroll}
+        sessionId={selectedSession}
+        onClearTimeline={clearTimeline}
+        onFindPreviousBotMessage={handleFindPreviousBotMessage}
+        onScrollToTop={scrollToTop}
+        onScrollToBottom={() => scrollToBottom('smooth')}
+        stats={stats}
+        status={selectedStageStatus}
+      />
+
+      <Card
+        className={cn(
+          'min-w-0 flex-1 overflow-hidden',
+          embedded ? 'min-h-0' : 'min-h-[420px] lg:min-h-0'
+        )}
+      >
+        <ScrollArea className="h-full" ref={scrollRef} onScrollCapture={handleScroll}>
+          <div className="min-w-0 p-4">
+            {visibleTimelineEntries.length === 0 ? (
+              <div className="text-muted-foreground flex flex-col items-center justify-center gap-3 py-20">
+                <Clock className="h-10 w-10 opacity-30" />
+                <p className="text-sm">等待 MaiSaka 推理事件…</p>
+                <p className="text-xs opacity-60">
+                  当 MaiSaka 处理新消息时，推理过程会实时展示在这里
+                </p>
+              </div>
+            ) : (
+              <div
+                className="relative min-w-0"
+                style={{ height: `${timelineVirtualizer.getTotalSize()}px` }}
+              >
+                {virtualItems.map((virtualItem) => {
+                  const entry = visibleTimelineEntries[virtualItem.index]
+                  if (!entry) return null
+                  const entryData = entry.data as unknown as Record<string, unknown>
+                  const entryMessageId =
+                    typeof entryData.message_id === 'string' ? entryData.message_id : undefined
+                  // 推理与推理、推理与消息之间用细横线分隔，连续消息之间不加
+                  const previousEntry = visibleTimelineEntries[virtualItem.index - 1]
+                  const showDivider =
+                    Boolean(previousEntry) &&
+                    !(isMessageTimelineEntry(entry) && isMessageTimelineEntry(previousEntry))
+                  return (
+                    <div
+                      key={virtualItem.key}
+                      ref={timelineVirtualizer.measureElement}
+                      data-index={virtualItem.index}
+                      className="absolute top-0 right-0 left-0 pb-3"
+                      style={{ transform: `translateY(${virtualItem.start}px)` }}
+                    >
+                      {showDivider && (
+                        <div
+                          data-maisaka-timeline-divider="true"
+                          className="border-border mb-3 border-t"
+                        />
+                      )}
+                      <div
+                        data-maisaka-message-id={entryMessageId}
+                        data-jump-highlighted={
+                          entryMessageId && focusedMessageId === entryMessageId
+                            ? 'true'
+                            : undefined
+                        }
+                        className={cn(
+                          'animate-in fade-in-0 slide-in-from-bottom-2 rounded-md duration-300',
+                          entryMessageId &&
+                            focusedMessageId === entryMessageId &&
+                            'bg-primary/5 ring-primary/55 ring-offset-background ring-2 ring-offset-2'
+                        )}
+                      >
+                        <TimelineEventRenderer
+                          messages={monitorMessages}
+                          entry={entry}
+                          onJumpToMessage={handleJumpToMessage}
+                          onOpenReasoning={handleOpenReasoning}
+                        />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </ScrollArea>
+      </Card>
+    </div>
+  )
+})
+
+// 会话摘要与详情分别订阅，其他群的状态更新不会穿透到虚拟时间线。
+function MonitorSidebar() {
+  const { sessions, stageStatuses, selectedSession, setSelectedSession, connected } =
+    useMaisakaMonitorOverview()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    const saved = localStorage.getItem('maisaka-monitor-sidebar-collapsed')
+    return saved !== 'false'
+  })
+
+  useEffect(() => {
+    localStorage.setItem('maisaka-monitor-sidebar-collapsed', String(sidebarCollapsed))
+  }, [sidebarCollapsed])
+
+  // 会话侧边栏
+  return (
+    <aside
+      className={cn(
+        'border-border bg-background/45 flex min-w-0 shrink-0 flex-col overflow-hidden border transition-[width] duration-200',
+        sidebarCollapsed ? 'w-full lg:w-16' : 'w-full lg:w-52'
+      )}
+    >
+      <div className={cn('py-2', sidebarCollapsed ? 'px-2' : 'px-3')}>
+        <h2
+          className={cn(
+            'flex items-center gap-2 text-sm font-medium',
+            sidebarCollapsed && 'justify-center text-[0px]'
+          )}
+        >
+          {!sidebarCollapsed && <Activity className="h-4 w-4" />}
+          聊天流
+          {connected && (
+            <span
+              className={cn(
+                'flex h-2 w-2 rounded-full bg-emerald-500',
+                !sidebarCollapsed && 'ml-auto'
+              )}
+            />
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 shrink-0"
+            onClick={() => setSidebarCollapsed((value) => !value)}
+            title={sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'}
+          >
+            {sidebarCollapsed ? (
+              <ChevronRight className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronLeft className="h-3.5 w-3.5" />
+            )}
+          </Button>
+        </h2>
+      </div>
+      <Separator />
+      <ScrollArea className="max-h-40 flex-1 lg:max-h-none">
+        <SessionSidebar
+          sessions={sessions}
+          stageStatuses={stageStatuses}
+          selectedSession={selectedSession}
+          onSelect={setSelectedSession}
+          collapsed={sidebarCollapsed}
+        />
+      </ScrollArea>
+    </aside>
+  )
+}
+
+export const MaisakaMonitor = memo(function MaisakaMonitor({
+  embedded = false,
+  reasoningReturnTo,
+}: MaisakaMonitorProps = {}) {
   return (
     <div
       className={cn(
@@ -1640,134 +2681,8 @@ export function MaisakaMonitor({ embedded = false, reasoningReturnTo }: MaisakaM
         embedded ? 'h-full min-h-0 p-2 sm:p-3' : 'gap-4 lg:h-[calc(100vh-116px)] lg:flex-row'
       )}
     >
-      {/* 会话侧边栏 */}
-      {!embedded && (
-        <aside
-          className={cn(
-            'border-border bg-background/45 flex min-w-0 shrink-0 flex-col overflow-hidden border transition-[width] duration-200',
-            sidebarCollapsed ? 'w-full lg:w-16' : 'w-full lg:w-52'
-          )}
-        >
-          <div className={cn('py-2', sidebarCollapsed ? 'px-2' : 'px-3')}>
-            <h2
-              className={cn(
-                'flex items-center gap-2 text-sm font-medium',
-                sidebarCollapsed && 'justify-center text-[0px]'
-              )}
-            >
-              {!sidebarCollapsed && <Activity className="h-4 w-4" />}
-              聊天流
-              {connected && (
-                <span
-                  className={cn(
-                    'flex h-2 w-2 rounded-full bg-emerald-500',
-                    !sidebarCollapsed && 'ml-auto'
-                  )}
-                />
-              )}
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 shrink-0"
-                onClick={() => setSidebarCollapsed((value) => !value)}
-                title={sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'}
-              >
-                {sidebarCollapsed ? (
-                  <ChevronRight className="h-3.5 w-3.5" />
-                ) : (
-                  <ChevronLeft className="h-3.5 w-3.5" />
-                )}
-              </Button>
-            </h2>
-          </div>
-          <Separator />
-          <ScrollArea className="max-h-40 flex-1 lg:max-h-none">
-            <SessionSidebar
-              sessions={sessions}
-              stageStatuses={stageStatuses}
-              selectedSession={selectedSession}
-              onSelect={setSelectedSession}
-              collapsed={sidebarCollapsed}
-            />
-          </ScrollArea>
-        </aside>
-      )}
-
-      {/* 主时间线区域 */}
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* 时间线 */}
-        <StageStatusPanel
-          autoScroll={autoScroll}
-          onClearTimeline={clearTimeline}
-          onScrollToBottom={() => scrollToBottom('smooth')}
-          stats={stats}
-          status={selectedStageStatus}
-        />
-
-        <Card
-          className={cn(
-            'min-w-0 flex-1 overflow-hidden',
-            embedded ? 'min-h-0' : 'min-h-[420px] lg:min-h-0'
-          )}
-        >
-          <ScrollArea className="h-full" ref={scrollRef} onScrollCapture={handleScroll}>
-            <div className="min-w-0 p-4">
-              {visibleTimelineEntries.length === 0 ? (
-                <div className="text-muted-foreground flex flex-col items-center justify-center gap-3 py-20">
-                  <Clock className="h-10 w-10 opacity-30" />
-                  <p className="text-sm">等待 MaiSaka 推理事件…</p>
-                  <p className="text-xs opacity-60">
-                    当 MaiSaka 处理新消息时，推理过程会实时展示在这里
-                  </p>
-                </div>
-              ) : (
-                <div
-                  className="relative min-w-0"
-                  style={{ height: `${timelineVirtualizer.getTotalSize()}px` }}
-                >
-                  {virtualItems.map((virtualItem) => {
-                    const entry = visibleTimelineEntries[virtualItem.index]
-                    if (!entry) return null
-                    const entryData = entry.data as unknown as Record<string, unknown>
-                    const entryMessageId =
-                      typeof entryData.message_id === 'string' ? entryData.message_id : undefined
-                    return (
-                      <div
-                        key={virtualItem.key}
-                        ref={timelineVirtualizer.measureElement}
-                        data-index={virtualItem.index}
-                        className="absolute top-0 right-0 left-0 pb-3"
-                        style={{ transform: `translateY(${virtualItem.start}px)` }}
-                      >
-                        <div
-                          data-maisaka-message-id={entryMessageId}
-                          data-jump-highlighted={
-                            entryMessageId && focusedMessageId === entryMessageId
-                              ? 'true'
-                              : undefined
-                          }
-                          className={cn(
-                            'animate-in fade-in-0 slide-in-from-bottom-2 rounded-md duration-300',
-                            entryMessageId &&
-                              focusedMessageId === entryMessageId &&
-                              'bg-primary/5 ring-primary/55 ring-offset-background ring-2 ring-offset-2'
-                          )}
-                        >
-                          <TimelineEventRenderer
-                            entry={entry}
-                            onJumpToMessage={handleJumpToMessage}
-                            onOpenReasoning={handleOpenReasoning}
-                          />
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          </ScrollArea>
-        </Card>
-      </div>
+      {!embedded && <MonitorSidebar />}
+      <MonitorTimeline embedded={embedded} reasoningReturnTo={reasoningReturnTo} />
     </div>
   )
-}
+})

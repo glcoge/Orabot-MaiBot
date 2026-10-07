@@ -5,6 +5,7 @@
  */
 import type { WsEventEnvelope } from './unified-ws'
 
+import { PlannerDeltaDecoder } from './maisaka-planner-delta'
 import { unifiedWsClient } from './unified-ws'
 
 // ─── 事件数据类型 ───────────────────────────────────────────────
@@ -194,9 +195,18 @@ export interface ToolExecutionEvent {
 }
 
 export interface MaisakaRequestBlock {
-  messages: MaisakaMessage[]
+  /** 完整请求仅旧版监控载荷携带；新版通过推理详情页读取。 */
+  messages?: MaisakaMessage[]
   selected_history_count: number
   tool_count: number
+  context_sections?: MaisakaContextSection[]
+}
+
+/** 提示词分段用量：字符数与条目数，token 由前端按占比换算 */
+export interface MaisakaContextSection {
+  key: string
+  chars: number
+  count: number
 }
 
 export interface MaisakaNativeToolCall {
@@ -210,11 +220,14 @@ export interface MaisakaNativeToolCall {
 
 export interface MaisakaPlannerBlock {
   content: string | null
+  model_name?: string | null
   tool_calls: MaisakaToolCall[]
   native_tool_calls?: MaisakaNativeToolCall[]
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
+  prompt_cache_hit_tokens?: number
+  prompt_cache_miss_tokens?: number
   duration_ms: number
   prompt_html_uri?: string
 }
@@ -236,6 +249,8 @@ export interface MaisakaTimingGateBlock {
 export interface MaisakaFinalizedToolResult {
   tool_call_id: string
   tool_name: string
+  model_name?: string
+  images?: { thumbnail_url: string; label: string; error?: string }[]
   tool_args: Record<string, unknown>
   tool_call_source?: string
   tool_call_source_label?: string
@@ -245,16 +260,20 @@ export interface MaisakaFinalizedToolResult {
   summary: string
   prompt_html_uri?: string
   detail?: unknown
+  matched_tool_names?: string[]
+  newly_discovered_tool_names?: string[]
 }
 
 export interface PlannerFinalizedEvent {
   session_id: string
   cycle_id: number
+  run_id?: string
   timestamp: number
   timing_gate: MaisakaTimingGateBlock | null
   request: MaisakaRequestBlock | null
   planner: MaisakaPlannerBlock | null
   tools: MaisakaFinalizedToolResult[]
+  active_tool_call_id?: string
   interrupted?: boolean
   final_state: {
     time_records: Record<string, number>
@@ -300,6 +319,7 @@ export type MaisakaMonitorEvent =
   | { type: 'planner.request'; data: PlannerRequestEvent }
   | { type: 'planner.response'; data: PlannerResponseEvent }
   | { type: 'planner.finalized'; data: PlannerFinalizedEvent }
+  | { type: 'planner.progress'; data: PlannerFinalizedEvent }
   | { type: 'tool.execution'; data: ToolExecutionEvent }
   | { type: 'replier.request'; data: ReplierRequestEvent }
   | { type: 'replier.response'; data: ReplierResponseEvent }
@@ -309,6 +329,7 @@ export type MaisakaEventListener = (event: MaisakaMonitorEvent) => void
 // ─── 客户端 ───────────────────────────────────────────────────
 
 class MaisakaMonitorClient {
+  private readonly plannerDecoder = new PlannerDeltaDecoder()
   private initialized = false
   private readonly initialReplayLimit = 1000
   private listenerIdCounter = 0
@@ -329,9 +350,12 @@ class MaisakaMonitorClient {
         return
       }
 
+      // 先重建快照，再交给事件去重/持久化；即使基准事件已入账，也必须更新解码基准。
+      const decoded = this.plannerDecoder.decode(message)
+      if (!decoded) return
       const event: MaisakaMonitorEvent = {
-        type: message.event as MaisakaMonitorEvent['type'],
-        data: message.data as never,
+        type: decoded.event as MaisakaMonitorEvent['type'],
+        data: decoded.data as never,
       }
 
       this.listeners.forEach((listener) => {
@@ -403,9 +427,15 @@ class MaisakaMonitorClient {
       this.deferredUnsubTimer = null
     }
 
-    const createdSubscription = await this.ensureSubscribed()
-    if (!createdSubscription) {
-      await this.replayFromCursor()
+    try {
+      const createdSubscription = await this.ensureSubscribed()
+      if (!createdSubscription) {
+        await this.replayFromCursor()
+      }
+    } catch (error) {
+      // 订阅失败时调用方拿不到退订函数，必须在这里回收监听器
+      this.listeners.delete(listenerId)
+      throw error
     }
 
     return async () => {
@@ -421,6 +451,10 @@ class MaisakaMonitorClient {
         }, 200)
       }
     }
+  }
+
+  onConnectionChange(listener: (connected: boolean) => void): () => void {
+    return unifiedWsClient.onConnectionChange(listener)
   }
 }
 

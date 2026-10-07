@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useRouter, useRouterState } from '@tanstack/react-router'
 import { AnimatePresence, motion } from 'motion/react'
@@ -17,9 +17,16 @@ import { TitleBar } from '@/components/electron/TitleBar'
 import { matchesShortcut } from '@/lib/keyboard'
 import { isElectron } from '@/lib/runtime'
 import { cn } from '@/lib/utils'
+import {
+  extensionIcons,
+  extensionPath,
+  extensionWorkspace,
+  usePluginWebUI,
+  visibleExtensions,
+} from '@/lib/plugin-webui'
 import { Header } from './Header'
 import { Sidebar } from './Sidebar'
-import type { LayoutProps, WorkspaceMode } from './types'
+import type { LayoutProps, MenuSection, WorkspaceMode } from './types'
 import { useMenuSections } from './use-menu-sections'
 
 const SIDEBAR_OPEN_STORAGE_KEY = 'maibot-layout-sidebar-open'
@@ -33,7 +40,12 @@ const UpdateNoticeDialog = lazy(() =>
   }))
 )
 
-type WorkspaceTransitionStage = 'idle' | 'page-exit' | 'sidebar-exit' | 'sidebar-enter' | 'page-enter'
+type WorkspaceTransitionStage =
+  | 'idle'
+  | 'page-exit'
+  | 'sidebar-exit'
+  | 'sidebar-enter'
+  | 'page-enter'
 
 function loadStoredBoolean(key: string, fallback: boolean): boolean {
   if (typeof window === 'undefined') {
@@ -53,24 +65,85 @@ export function Layout({ children }: LayoutProps) {
   const pathname = useRouterState({ select: (state) => state.location.pathname })
   const routeStatus = useRouterState({ select: (state) => state.status })
   const announce = useAnnounce()
+  const extensionRegistry = usePluginWebUI(!checking)
+  const extensions = useMemo(() => visibleExtensions(extensionRegistry), [extensionRegistry])
+  const workspaceForPath = (path: string): WorkspaceMode => {
+    const extension = extensions.find((extension) =>
+      extension.pages.some(
+        (page) =>
+          page.placement === 'workspace' && extensionPath(extension.plugin_id, page.id) === path
+      )
+    )
+    return extension ? extensionWorkspace(extension.plugin_id) : 'settings'
+  }
   const isLogsPath =
     pathname === '/logs' || pathname === '/statistics' || pathname.startsWith('/reasoning-process')
-  const workspaceMode = pathname === '/chat' ? 'chat' : isLogsPath ? 'logs' : 'settings'
-  const isSettingsWorkspace = workspaceMode === 'settings'
-  const showBackToTop = isSettingsWorkspace && pathname !== '/planner-monitor'
+  // 麦麦聊天已并入麦麦设置侧边栏，/chat 属于设置工作区
+  const workspaceMode: WorkspaceMode = isLogsPath ? 'logs' : workspaceForPath(pathname)
+  const isSettingsWorkspace = workspaceMode !== 'logs'
+  const showBackToTop =
+    isSettingsWorkspace && pathname !== '/chat' && pathname !== '/planner-monitor'
 
-  const [sidebarOpen, setSidebarOpen] = useState(() => loadStoredBoolean(SIDEBAR_OPEN_STORAGE_KEY, true))
+  const [sidebarOpen, setSidebarOpen] = useState(() =>
+    loadStoredBoolean(SIDEBAR_OPEN_STORAGE_KEY, true)
+  )
   const [skipSidebarResizeAnimation, setSkipSidebarResizeAnimation] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
-  const [topbarCollapsed, setTopbarCollapsed] = useState(() => loadStoredBoolean(TOPBAR_COLLAPSED_STORAGE_KEY, false))
-  const [workspaceTransitionStage, setWorkspaceTransitionStage] = useState<WorkspaceTransitionStage>('idle')
-  const [workspaceTransitionTarget, setWorkspaceTransitionTarget] = useState<WorkspaceMode | null>(null)
+  const [topbarCollapsed, setTopbarCollapsed] = useState(() =>
+    loadStoredBoolean(TOPBAR_COLLAPSED_STORAGE_KEY, false)
+  )
+  const [workspaceTransitionStage, setWorkspaceTransitionStage] =
+    useState<WorkspaceTransitionStage>('idle')
+  const [workspaceTransitionTarget, setWorkspaceTransitionTarget] = useState<WorkspaceMode | null>(
+    null
+  )
   const workspaceTransitionTimerRef = useRef<number | null>(null)
   const shellStateRef = useRef({ sidebarOpen, topbarCollapsed })
-  const immersiveRestoreRef = useRef<{ sidebarOpen: boolean; topbarCollapsed: boolean } | null>(null)
-  const { theme, setTheme } = useTheme()
-  const menuSections = useMenuSections()
+  const immersiveRestoreRef = useRef<{ sidebarOpen: boolean; topbarCollapsed: boolean } | null>(
+    null
+  )
+  const { theme, setTheme, themeConfig } = useTheme()
+  const effectiveSidebarOpen = themeConfig.dashboardStyle !== 'millennium' && sidebarOpen
+  const builtInMenuSections = useMenuSections()
+  // 日志工作区在移动端保留麦麦导航，顶栏菜单按钮与其它页面保持一致。
+  const sidebarWorkspaceMode = workspaceMode === 'logs' ? 'settings' : workspaceMode
+  const menuSections = useMemo(() => {
+    const pluginMenuSections: MenuSection[] = extensions.flatMap((extension) => {
+      const pages = extension.pages.filter((page) =>
+        page.placement === 'sidebar'
+          ? sidebarWorkspaceMode === 'settings'
+          : sidebarWorkspaceMode === extensionWorkspace(extension.plugin_id)
+      )
+      return pages.length
+        ? [
+            {
+              title: extension.workspace_title ?? extension.plugin_id,
+              literalTitle: true,
+              items: pages.map((page) => ({
+                icon: extensionIcons[page.icon],
+                label: page.title,
+                literalLabel: true,
+                path: extensionPath(extension.plugin_id, page.id),
+              })),
+            },
+          ]
+        : []
+    })
+    return sidebarWorkspaceMode === 'settings'
+      ? [
+          ...builtInMenuSections,
+          ...(pluginMenuSections.length
+            ? [
+                {
+                  title: 'pluginWebUI.extensions',
+                  items: pluginMenuSections.flatMap((section) => section.items),
+                },
+              ]
+            : []),
+        ]
+      : pluginMenuSections
+  }, [builtInMenuSections, extensions, sidebarWorkspaceMode])
 
   useEffect(() => {
     shellStateRef.current = { sidebarOpen, topbarCollapsed }
@@ -137,12 +210,11 @@ export function Layout({ children }: LayoutProps) {
     const pathToLabel: Record<string, string> = {}
     for (const section of menuSections) {
       for (const item of section.items) {
-        pathToLabel[item.path] = t(item.label)
+        pathToLabel[item.path] = item.literalLabel ? item.label : t(item.label)
       }
     }
     pathToLabel['/chat'] = t('workspace.chat')
     pathToLabel['/planner-monitor'] = t('sidebar.menu.maisakaMonitor')
-    pathToLabel['/focus'] = t('sidebar.menu.focusCompanion')
     pathToLabel['/logs'] = t('workspace.logs')
     pathToLabel['/reasoning-process'] = t('sidebar.menu.reasoningProcess')
 
@@ -198,7 +270,7 @@ export function Layout({ children }: LayoutProps) {
     // pathname 与 Outlet 由路由器分别传播。等新 workspace 完成一次提交后再进入，
     // 避免目标 wrapper 已切换、children 仍短暂保留旧首页时把旧内容重新显示出来。
     const frameId = window.requestAnimationFrame(() => {
-      if (workspaceTransitionTarget === 'settings') {
+      if (workspaceTransitionTarget !== 'logs') {
         setWorkspaceTransitionStage('sidebar-enter')
         scheduleWorkspaceTransition(() => {
           setWorkspaceTransitionStage('page-enter')
@@ -220,14 +292,14 @@ export function Layout({ children }: LayoutProps) {
     return () => window.cancelAnimationFrame(frameId)
   }, [routeStatus, scheduleWorkspaceTransition, workspaceMode, workspaceTransitionTarget])
 
-  const handleWorkspaceNavigate = (to: '/' | '/chat' | '/logs') => {
+  const handleWorkspaceNavigate = (to: string) => {
     if (workspaceTransitionStage !== 'idle') {
       return
     }
 
     setMobileMenuOpen(false)
     setSkipSidebarResizeAnimation(false)
-    setWorkspaceTransitionTarget(to === '/chat' ? 'chat' : to === '/logs' ? 'logs' : 'settings')
+    setWorkspaceTransitionTarget(to === '/logs' ? 'logs' : workspaceForPath(to))
 
     const enterWorkspace = () => {
       void router.navigate({ to }).catch(() => {
@@ -238,7 +310,7 @@ export function Layout({ children }: LayoutProps) {
 
     setWorkspaceTransitionStage('page-exit')
     scheduleWorkspaceTransition(() => {
-      if (workspaceMode === 'settings') {
+      if (workspaceMode !== 'logs') {
         setWorkspaceTransitionStage('sidebar-exit')
         scheduleWorkspaceTransition(enterWorkspace, SIDEBAR_TRANSITION_DURATION_MS)
         return
@@ -257,6 +329,17 @@ export function Layout({ children }: LayoutProps) {
     workspaceTransitionStage !== 'idle' &&
     workspaceTransitionStage !== 'page-enter'
   const sidebarExiting = workspaceTransitionStage === 'sidebar-exit'
+  // 去往日志工作区时侧栏只滑出、不收布局宽度：顶栏不跟着侧栏位移，切换完成后由日志槽位接管这段宽度。
+  const sidebarKeepsWidth = sidebarExiting && workspaceTransitionTarget === 'logs'
+  // 侧栏滑出/滑入期间顶栏延伸到侧栏下方，侧栏移开时露出的是完整的顶栏而不是页面底色。
+  // 千禧风格的铭牌与顶栏是同一条机壳上沿：顶栏常驻垫在侧栏下方，
+  // 否则非整数缩放下侧栏裁剪边缘的抗锯齿会在两段投影之间透出一条细缝。
+  const sidebarUnderlay =
+    isSettingsWorkspace &&
+    (themeConfig.dashboardStyle === 'millennium' || sidebarKeepsWidth || targetWorkspaceWaiting)
+  // 日志视图切换挂在顶栏里，不随页面容器移动；让它与页面同步退场/入场，避免突兀地出现或消失。
+  const logSwitcherHidden =
+    workspaceTransitionStage !== 'idle' && workspaceTransitionStage !== 'page-enter'
   const handleSidebarFix = () => {
     // 悬浮展开已处于完整宽度；固定时跳过占位宽度过渡，避免已经展开的侧栏出现二次动画。
     setSkipSidebarResizeAnimation(true)
@@ -292,8 +375,11 @@ export function Layout({ children }: LayoutProps) {
           {/* Sidebar：离开设置工作区时向左收起，并同步释放布局宽度 */}
           {isSettingsWorkspace && (
             <motion.div
-              key="settings-sidebar"
+              key={workspaceMode}
               data-dashboard-sidebar-layout="true"
+              data-dashboard-header-underlay={
+                sidebarUnderlay && !topbarCollapsed ? 'true' : undefined
+              }
               layout={false}
               className={cn(
                 'relative z-40 hidden shrink-0 transition-[width] duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none lg:block',
@@ -302,9 +388,9 @@ export function Layout({ children }: LayoutProps) {
               )}
               initial={false}
               style={{
-                width: sidebarExiting
+                width: sidebarExiting && !sidebarKeepsWidth
                   ? 0
-                  : sidebarOpen
+                  : effectiveSidebarOpen
                     ? 'var(--layout-sidebar-width)'
                     : 'var(--layout-sidebar-collapsed-width)',
               }}
@@ -316,8 +402,10 @@ export function Layout({ children }: LayoutProps) {
                 transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
               >
                 <Sidebar
-                  sidebarOpen={sidebarOpen}
+                  menuSections={menuSections}
+                  sidebarOpen={effectiveSidebarOpen}
                   mobileMenuOpen={mobileMenuOpen}
+                  topbarCollapsed={topbarCollapsed}
                   onMobileMenuClose={() => setMobileMenuOpen(false)}
                   onSidebarFix={handleSidebarFix}
                 />
@@ -326,20 +414,20 @@ export function Layout({ children }: LayoutProps) {
           )}
 
           {/* 移动端 Sidebar 走自己的 fixed 定位，通过 mobileMenuOpen 控制显隐 */}
-          {isSettingsWorkspace && (
-            <div className="lg:hidden">
-              <Sidebar
-                sidebarOpen={sidebarOpen}
-                mobileMenuOpen={mobileMenuOpen}
-                onMobileMenuClose={() => setMobileMenuOpen(false)}
-                onSidebarFix={handleSidebarFix}
-              />
-            </div>
-          )}
+          <div className="lg:hidden">
+            <Sidebar
+              menuSections={menuSections}
+              sidebarOpen={effectiveSidebarOpen}
+              mobileMenuOpen={mobileMenuOpen}
+              topbarCollapsed={topbarCollapsed}
+              onMobileMenuClose={() => setMobileMenuOpen(false)}
+              onSidebarFix={handleSidebarFix}
+            />
+          </div>
 
           {/* Mobile overlay */}
           <AnimatePresence>
-            {isSettingsWorkspace && mobileMenuOpen && (
+            {mobileMenuOpen && (
               <motion.div
                 aria-hidden="true"
                 className="fixed inset-0 z-40 bg-black/50 lg:hidden"
@@ -354,14 +442,21 @@ export function Layout({ children }: LayoutProps) {
           {/* Main content */}
           <motion.div
             layout={false}
-            className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+            className={cn(
+              'flex min-h-0 min-w-0 flex-1 flex-col',
+              // 顶栏延伸到侧栏下方时不能被本列裁掉；页面内容仍由 main 自己裁剪。
+              sidebarUnderlay ? 'overflow-visible' : 'overflow-hidden'
+            )}
           >
             {/* HTTP 安全警告横幅 */}
             <HttpWarningBanner />
 
             {/* Topbar */}
             <Header
-              sidebarOpen={sidebarOpen}
+              extensions={extensions}
+              logSwitcherHidden={logSwitcherHidden}
+              sidebarUnderlay={sidebarUnderlay}
+              sidebarOpen={effectiveSidebarOpen}
               mobileMenuOpen={mobileMenuOpen}
               searchOpen={searchOpen}
               actualTheme={actualTheme}
@@ -385,13 +480,9 @@ export function Layout({ children }: LayoutProps) {
                 workspaceTransitionStage !== 'idle'
                   ? 'overflow-hidden'
                   : isSettingsWorkspace
-                    ? 'overflow-y-auto overflow-x-hidden overscroll-contain'
+                    ? 'overflow-x-hidden overflow-y-auto overscroll-contain'
                     : 'overflow-hidden',
-                workspaceMode === 'chat'
-                  ? 'bg-transparent'
-                  : pageBg.type === 'none'
-                    ? 'bg-background'
-                    : 'bg-transparent'
+                pageBg.type === 'none' ? 'bg-background' : 'bg-transparent'
               )}
             >
               <motion.div
@@ -402,19 +493,11 @@ export function Layout({ children }: LayoutProps) {
                   isSettingsWorkspace && 'min-h-full',
                   targetWorkspaceWaiting && 'invisible'
                 )}
-                variants={
-                  workspaceMode === 'chat'
-                    ? {
-                        initial: { opacity: 1 },
-                        animate: { opacity: 1 },
-                        exit: { opacity: 1 },
-                      }
-                    : {
-                        initial: { y: '100%' },
-                        animate: { y: 0 },
-                        exit: { y: '100%' },
-                      }
-                }
+                variants={{
+                  initial: { y: '100%' },
+                  animate: { y: 0 },
+                  exit: { y: '100%' },
+                }}
                 initial="initial"
                 animate={pageHidden ? 'exit' : 'animate'}
                 transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}

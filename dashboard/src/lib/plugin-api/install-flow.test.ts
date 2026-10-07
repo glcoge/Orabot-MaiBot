@@ -32,6 +32,7 @@ describe('installPlugin', () => {
         plugin_id: 'demo',
         repository_url: 'https://github.com/user/demo.git',
         branch: 'main',
+        version: 'latest',
       },
       errorMessage: '安装插件失败',
     })
@@ -97,6 +98,7 @@ describe('updatePlugin', () => {
         plugin_id: 'demo',
         repository_url: 'https://github.com/user/demo.git',
         branch: 'main',
+        version: 'latest',
       },
       errorMessage: '更新插件失败',
     })
