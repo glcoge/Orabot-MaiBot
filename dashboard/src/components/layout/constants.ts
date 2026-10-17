@@ -2,11 +2,9 @@ import { createElement } from 'react'
 import {
   Activity,
   Box,
-  Brain,
   Database,
   FileText,
   HardDrive,
-  Hash,
   Home,
   MessageCircle,
   MessageSquare,
@@ -27,9 +25,7 @@ const BotConfigIcon = createStreamlineIcon('page-setting-remix', Settings)
 const ModelIcon = createStreamlineIcon('module-remix', Box)
 const PromptIcon = createStreamlineIcon('script-1-remix', FileText)
 const EmojiIcon = createStreamlineIcon('happy-face-remix', Smile)
-const ExpressionIcon = createStreamlineIcon('chat-bubble-square-write-remix', MessageSquare)
-const JargonIcon = createStreamlineIcon('sign-hashtag-solid', Hash)
-const BehaviorIcon = createStreamlineIcon('cyborg-solid', Brain)
+const LearningIcon = createStreamlineIcon('chat-bubble-square-write-remix', MessageSquare)
 const KnowledgeIcon = createStreamlineIcon('user-sticker-square-remix', Database)
 const PluginConfigIcon = createStreamlineIcon('application-add-remix', Puzzle)
 const AdapterManagementIcon = createStreamlineIcon('router-wifi-network-solid', Wifi)
@@ -83,23 +79,10 @@ export const menuSections: MenuSection[] = [
         searchDescription: 'search.items.emojiDesc',
       },
       {
-        icon: ExpressionIcon,
-        label: 'sidebar.menu.expressionManagement',
-        path: '/resource/expression',
-        searchDescription: 'search.items.expressionDesc',
-      },
-      {
-        icon: JargonIcon,
-        label: 'sidebar.menu.slangManagement',
-        path: '/resource/jargon',
-        searchDescription: 'search.items.jargonDesc',
-      },
-      {
-        icon: BehaviorIcon,
-        label: 'sidebar.menu.behaviorLearning',
-        path: '/resource/behavior',
-        searchDescription: 'search.items.behaviorLearningDesc',
-        featureFlag: 'behaviorLearning',
+        icon: LearningIcon,
+        label: 'sidebar.menu.learning',
+        path: '/resource/learning',
+        searchDescription: 'search.items.learningDesc',
       },
       {
         icon: KnowledgeIcon,

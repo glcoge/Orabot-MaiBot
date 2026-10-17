@@ -63,14 +63,6 @@ export interface InstalledPlugin {
     half_open_inflight: boolean
   } | null
 }
-/**
- * 旧版本插件格式(直接包含 version 字段)
- */
-export interface LegacyInstalledPlugin {
-  id: string
-  version: string
-  path: string
-}
 
 export interface RuntimeCommand {
   aliases: string[]
@@ -217,9 +209,10 @@ export interface PluginConfigSchema {
  * 插件配置页初始化数据
  */
 export interface PluginConfigBundle {
-  schema: PluginConfigSchema
+  schema: PluginConfigSchema | null
   config: Record<string, unknown>
   rawConfig: string
+  configError?: string
   message?: string
 }
 

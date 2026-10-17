@@ -1,5 +1,21 @@
 {
   "pluginWebUI": {
+    "customReload": "重载页面",
+    "customStop": "停止页面",
+    "customStopped": "页面已停止。点击重载页面可再次运行。",
+    "customStopRequestRate": "请求过于频繁，页面已停止（允许每秒 20 次请求，最多突发 200 次）。",
+    "customStopLayoutRate": "页面尺寸更新过于频繁，页面已停止。",
+    "customStopHeight": "页面高度无效或超过 30000 像素，页面已停止。",
+    "customStopDuplicateId": "插件发送了重复的请求编号，页面已停止。",
+    "customStopTimeout": "页面连接超过 10 秒未就绪，页面已停止。",
+    "customStopManual": "你已停止页面。",
+    "customStopNavigation": "页面发生了重新加载或跳转，连接已停止。",
+    "workspaceOrder": "顶部 Tab 排序",
+    "workspaceOrderHint": "未隐藏的插件按此顺序排列，顶部最多显示两个，其余从旁边的“更多”菜单进入；当前打开的插件保持可见。排序立即生效，并保存在当前浏览器。",
+    "galleryLayout": "布局选择",
+    "paginationSummary": "第{{page}} / {{pages}}页 · 共{{total}}张",
+    "galleryAuto": "自动排布",
+    "galleryColumns": "{{count}}列",
     "extensions": "插件扩展",
     "manage": "管理插件页面",
     "more": "更多插件工作区",
@@ -57,9 +73,9 @@
       "modelManagement": "模型管理",
       "promptManagement": "Prompt管理",
       "emojiManagement": "表情包",
+      "learning": "学习",
       "expressionManagement": "表达方式",
       "slangManagement": "黑话",
-      "behaviorLearning": "行为学习",
       "personInfo": "人物信息管理",
       "knowledgeGraph": "长期记忆图谱",
       "knowledgeBase": "长期记忆",
@@ -198,6 +214,14 @@
     "logs": "日志"
   },
   "chat": {
+    "setupTrial": {
+      "title": "试试和麦麦聊天",
+      "description": "先发一句「你好」，确认麦麦能正常回复。",
+      "repliedTitle": "已收到麦麦的回复",
+      "repliedDescription": "如果回复和说话风格符合预期，就可以继续配置消息平台。",
+      "keepChatting": "继续聊聊",
+      "continue": "试聊正常，配置消息平台"
+    },
     "botNameFallback": "麦麦",
     "userFallback": "用户",
     "userNameFallback": "人类",
@@ -339,6 +363,11 @@
       "sessionUnavailable": "无法建立聊天会话，请稍后重试",
       "virtualTabCreated": "虚拟身份标签页",
       "virtualTabCreatedDesc": "已创建 {{label}} 的对话"
+    },
+    "mobile": {
+      "back": "返回会话列表",
+      "close": "关闭",
+      "settings": "设置"
     }
   },
   "layout": {
@@ -466,6 +495,7 @@
       "retroPanelDepthDesc": "控制凹陷区域与阴影的可见程度。"
     },
     "security": {
+      "tokenManagement": "Access Token 管理",
       "currentToken": "当前 Access Token",
       "yourToken": "您的访问令牌",
       "regenerate": "重新生成",
@@ -615,6 +645,60 @@
       "resetDone": "已重置",
       "resetDoneDesc": "所有设置已恢复为默认值，刷新页面以应用更改"
     },
+    "selfUpdate": {
+      "title": "主程序更新",
+      "current": "当前版本 {{version}}",
+      "loading": "正在读取更新状态…",
+      "loadFailed": "读取更新状态失败",
+      "check": "检查更新",
+      "checking": "正在检查…",
+      "checkFailed": "检查更新失败",
+      "notChecked": "尚未检查更新",
+      "upToDate": "已是最新版本",
+      "checkedAt": "检查于 {{time}}",
+      "newVersion": "发现新版本 {{version}}",
+      "newCommits": "有 {{count}} 个新提交",
+      "behind": "落后官方 {{branch}} 分支 {{count}} 个提交",
+      "moreCommits": "仅显示最近 {{count}} 个提交",
+      "dependenciesChanged": "本次更新包含依赖变更，更新时会自动同步依赖（{{tool}}）",
+      "cannotApply": "暂时无法自动更新",
+      "dirtyFiles": "有改动的文件：",
+      "apply": "立即更新",
+      "applyFailed": "发起更新失败",
+      "confirmTitle": "更新到 {{version}}？",
+      "confirmDesc": "更新期间麦麦会离线几分钟：先停止运行，再拉取新版本、同步依赖并重新启动。拉取或依赖同步失败时会自动回滚到当前版本。建议先备份 data 目录。",
+      "confirmAction": "更新并重启",
+      "cancel": "取消",
+      "overlayTitle": "正在更新麦麦",
+      "overlayDesc": "正在拉取新版本并同步依赖，可能需要几分钟，请不要关闭麦麦",
+      "source": "更新来源：{{name}}",
+      "sourceHint": "按插件市场的镜像源设置依次尝试，只拉取官方仓库 Mai-with-u/MaiBot",
+      "packageSourceHint": "从 PyPI 安装正式版；更新前备份配置和数据库，同环境的其他实例须先停止。",
+      "packageConfirmDesc": "更新期间麦麦会离线几分钟。程序会先备份配置和数据库，再使用 uv 安装你确认的版本并重启；安装验证失败时尝试恢复原包和依赖。备份位于 data/self_update/backups，新版本启动后的数据库迁移不会自动回退。",
+      "lastSuccess": "已于 {{time}} 从 {{from}} 更新到 {{to}}",
+      "lastFailed": "{{time}} 更新到 {{to}} 失败",
+      "rolledBack": "已自动回滚到更新前的版本",
+      "rollbackFailed": "自动回滚失败，请手动检查仓库与依赖状态：{{error}}",
+      "toastSuccess": "更新完成",
+      "toastSuccessDesc": "已更新到 {{version}}",
+      "toastFailed": "更新失败",
+      "toastFailedDesc": "更新失败，详情见「设置 → 关于」",
+      "blockers": {
+        "uv_missing": "未找到 uv，请将 uv 加入启动环境的 PATH",
+        "not_uv_tool": "当前不是 PyPI 来源的 uv tool 安装，请使用原安装工具更新",
+        "package_runner_missing": "请通过 maibot run 启动以支持自动更新",
+        "other_instances_running": "请先停止同一工具环境中的其他 MaiBot 实例",
+        "package_busy": "工具环境正在更新，请稍后重试",
+        "git_missing": "未找到 Git，无法自更新",
+        "not_git_repo": "当前部署不是 Git 仓库（如 Docker 镜像或压缩包），请按对应的部署方式更新",
+        "detached_head": "当前不在任何分支上（分离头指针），无法自更新",
+        "unsupported_branch": "仅支持在 main 或 dev 分支上自更新",
+        "dirty_worktree": "存在未提交的本地改动，请先提交或还原",
+        "diverged": "本地存在官方分支没有的提交，无法快进更新",
+        "no_dependency_tool": "本次更新包含依赖变更，但未找到可用的依赖安装方式（uv 或 pip）",
+        "python_requirement_changed": "本次更新修改了 Python 版本要求，请手动更新"
+      }
+    },
     "about": {
       "openSource": "开源项目",
       "aboutApp": "关于 MaiBot Dashboard",
@@ -761,7 +845,7 @@
       "saveFailedTitle": "保存失败",
       "validationFailedTitle": "验证失败",
       "completeSuccessTitle": "配置完成",
-      "completeSuccessDescription": "{{appName}} 配置已保存并生效。",
+      "completeSuccessDescription": "{{appName}} 配置已保存。先在「聊聊」发一句「你好」，试试麦麦的回复和说话风格。",
       "completeFailedTitle": "配置失败",
       "skipFailedTitle": "跳过失败",
       "customTokenSuccessTitle": "密码已更新",
@@ -1018,7 +1102,7 @@
     "navigate": "导航",
     "select": "选择",
     "close": "关闭",
-    "aiSearch": "AI 搜索",
+    "aiSearch": "提问",
     "aiSearching": "AI 理解中",
     "aiHint": "可以描述你想调整的效果，例如“麦麦说话太频繁”",
     "progressTitle": "搜索过程",
@@ -1065,12 +1149,12 @@
       "emoji": "表情包",
       "emojiDesc": "管理麦麦的表情包",
       "expression": "表达方式",
+      "learningDesc": "管理麦麦学习到的表达方式、黑话和俚语",
       "expressionDesc": "管理麦麦的表达方式",
       "person": "人物信息管理",
       "personDesc": "管理人物信息",
       "jargon": "黑话",
       "jargonDesc": "管理麦麦学习到的黑话和俚语",
-      "behaviorLearningDesc": "浏览行为经验路径和检索命中",
       "statistics": "统计信息",
       "statisticsDesc": "查看使用统计",
       "plugins": "插件市场",
@@ -1575,6 +1659,33 @@
       "requestTrend": "每小时请求量趋势图，显示最近若干小时的请求次数变化",
       "costTrend": "API花费趋势图，显示最近若干小时的API调用成本变化",
       "tokenUsage": "Token消耗趋势图，显示最近若干小时的Token使用量变化"
+    },
+    "mobile": {
+      "title": "麦麦",
+      "openSettings": "WebUI 设置"
     }
+  },
+  "mobileNav": {
+    "label": "主导航",
+    "home": "首页",
+    "chat": "聊天",
+    "manage": "管理",
+    "me": "我的",
+    "search": "搜索",
+    "live": "麦麦实时",
+    "botInitial": "麦",
+    "backHome": "返回首页",
+    "backManage": "返回管理"
+  },
+  "manage": {
+    "searchPlaceholder": "搜索页面或设置项",
+    "groups": {
+      "runtime": "运行记录"
+    }
+  },
+  "dynamicForm": {
+    "mobileTextEmpty": "未填写",
+    "mobileTextCancel": "取消",
+    "mobileTextDone": "完成"
   }
 }
