@@ -32,6 +32,7 @@ import stat
 
 import tomlkit
 
+from src.common.paths import PACKAGE_ROOT, get_instance_root
 from src.common.logger import get_logger
 from src.common.shutdown import is_shutdown_requested
 from src.config.config import config_manager
@@ -199,6 +200,21 @@ class PluginRuntimeManager(
                 raise RuntimeError(f"插件 {plugin_id} 没有对应的运行时")
             snapshot = await supervisor.inspect_plugin_config(plugin_id)
             loaded = plugin_id in supervisor.get_loaded_plugin_ids()
+            if snapshot.config_error:
+                if not loaded or supervisor.get_plugin_config_error(plugin_id) != snapshot.config_error:
+                    if not await self.reload_plugins_globally([plugin_id], reason="config_invalid"):
+                        raise RuntimeError("插件配置管理状态加载失败")
+                self._applied_plugin_configs.pop(plugin_id, None)
+                self._notify_status_changed()
+                await self._refresh_plugin_config_watch_subscriptions()
+                return "config_error"
+            if loaded and supervisor.get_plugin_config_error(plugin_id):
+                if not await self.reload_plugins_globally([plugin_id], reason="config_repaired"):
+                    raise RuntimeError("修正配置后插件激活失败")
+                self._applied_plugin_configs[plugin_id] = dict(snapshot.normalized_config)
+                self._notify_status_changed()
+                await self._refresh_plugin_config_watch_subscriptions()
+                return "success" if snapshot.enabled else "inactive"
             config_data = dict(snapshot.normalized_config)
             if self._applied_plugin_configs.get(plugin_id) == config_data and loaded == snapshot.enabled:
                 return "success" if loaded else "inactive"
@@ -278,13 +294,13 @@ class PluginRuntimeManager(
     @staticmethod
     def _get_builtin_plugin_dirs() -> List[Path]:
         """内置插件目录：src/plugins/built_in/"""
-        candidate = Path("src", "plugins", "built_in").resolve()
+        candidate = (PACKAGE_ROOT / "plugins" / "built_in").resolve()
         return [candidate] if candidate.is_dir() else []
 
     @staticmethod
     def _get_third_party_plugin_dirs() -> List[Path]:
         """第三方插件目录：plugins/"""
-        candidate = Path("plugins").resolve()
+        candidate = (get_instance_root() / "plugins").resolve()
         return [candidate] if candidate.is_dir() else []
 
     @classmethod

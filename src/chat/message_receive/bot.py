@@ -3,11 +3,11 @@
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
-import os
 import traceback
 
 from maim_message import MessageBase
 
+from src.common.paths import get_instance_root
 from src.chat.heart_flow.heartflow_message_processor import HeartFCMessageReceiver
 from src.chat.heart_flow.heartflow_manager import heartflow_manager
 from src.common.logger import get_logger
@@ -35,7 +35,7 @@ from .message import SessionMessage
 # 定义日志配置
 
 # 获取项目根目录（假设本文件在src/chat/message_receive/下，根目录为上上上级目录）
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+PROJECT_ROOT = str(get_instance_root())
 
 # 配置主程序日志格式
 logger = get_logger("chat")
@@ -506,7 +506,7 @@ class ChatBot:
         had_runtime = await heartflow_manager.clear_chat_history_context(message.session_id)
 
         sent = await text_to_stream(
-            "已清空当前聊天的 Maisaka 历史上下文。",
+            "我暂时失忆了",
             message.session_id,
             storage_message=False,
         )
@@ -750,11 +750,8 @@ class ChatBot:
         try:
             group_info = message.message_info.group_info
             user_info = message.message_info.user_info
-            account_id = None
-            scope = None
-            additional_config = message.message_info.additional_config
-            if isinstance(additional_config, dict):
-                account_id, scope = RouteKeyFactory.extract_components(additional_config)
+            route_key = RouteKeyFactory.from_session_message(message)
+            account_id, scope = route_key.account_id, route_key.scope
 
             session_id = SessionUtils.calculate_session_id(
                 message.platform,
@@ -794,9 +791,8 @@ class ChatBot:
 
             group_info = message.message_info.group_info
             user_info = message.message_info.user_info
-            additional_config = message.message_info.additional_config
-            if isinstance(additional_config, dict):
-                account_id, scope = RouteKeyFactory.extract_components(additional_config)
+            route_key = RouteKeyFactory.from_session_message(message)
+            account_id, scope = route_key.account_id, route_key.scope
 
             # 通知消息（戳一戳、撤回、禁言等）由适配器标记 is_notify=True，
             await self.handle_notice_message(message)
@@ -820,6 +816,9 @@ class ChatBot:
             group_info = message.message_info.group_info
             user_info = message.message_info.user_info
 
+            # Hook 处理后重新读取正式归属，确保消息注册和聊天流创建使用同一条路由。
+            route_key = RouteKeyFactory.from_session_message(message)
+            account_id, scope = route_key.account_id, route_key.scope
             # 平台层的 @ 检测由底层 is_mentioned_bot_in_message 统一处理；此处不做用户名硬编码匹配
 
             # 已注册命令优先进入命令链；普通消息仍需先通过聊天过滤。

@@ -2,12 +2,14 @@ import asyncio
 import copy
 import hashlib
 import inspect
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence, TypeVar, cast
 
 import tomlkit
 
+from src.common.paths import get_instance_root
 from src.common.i18n import t
 from src.common.logger import get_logger
 from src.common.version import read_project_version
@@ -60,15 +62,15 @@ from .official_configs import (
     修订号：配置文件内容小更新
 """
 
-PROJECT_ROOT: Path = Path(__file__).parent.parent.parent.absolute().resolve()
+PROJECT_ROOT: Path = get_instance_root()
 CONFIG_DIR: Path = PROJECT_ROOT / "config"
 BOT_CONFIG_PATH: Path = (CONFIG_DIR / "bot_config.toml").resolve().absolute()
 MODEL_CONFIG_PATH: Path = (CONFIG_DIR / "model_config.toml").resolve().absolute()
 LEGACY_ENV_PATH: Path = (PROJECT_ROOT / ".env").resolve().absolute()
 A_MEMORIX_LEGACY_CONFIG_PATH: Path = (CONFIG_DIR / "a_memorix.toml").resolve().absolute()
 MMC_VERSION: str = read_project_version(PROJECT_ROOT)
-CONFIG_VERSION: str = "8.14.62"
-MODEL_CONFIG_VERSION: str = "1.17.15"
+CONFIG_VERSION: str = "8.15.4"
+MODEL_CONFIG_VERSION: str = "1.17.17"
 
 logger = get_logger("config")
 
@@ -193,6 +195,10 @@ class ModelConfig(ConfigBase):
         model_names = [model.name for model in self.models]
         if len(model_names) != len(set(model_names)):
             raise ValueError(t("config.model_name_duplicate"))
+
+        for model_name in self.model_task_config.embedding.model_list:
+            if model_name not in model_names:
+                raise ValueError(f"embedding.model_list references an undefined model: {model_name}")
 
         api_providers_dict = {provider.name: provider for provider in self.api_providers}
 
@@ -635,8 +641,12 @@ class ConfigManager:
     async def start_file_watcher(self) -> None:
         if self._file_watcher is not None and self._file_watcher.running:
             return
+        from src.platform_io.adapter_policy import get_adapter_policy_manager
+
+        policy_path = get_adapter_policy_manager().policy_path
         self._file_watcher = FileWatcher(
-            paths=[self.bot_config_path, self.model_config_path],
+            # 监听父目录，覆盖策略文件首次创建以及编辑器的原子替换保存。
+            paths=list({self.bot_config_path.parent, self.model_config_path.parent, policy_path.parent}),
             debounce_ms=600,
             callback_timeout_s=15.0,
             callback_failure_threshold=3,
@@ -644,7 +654,7 @@ class ConfigManager:
         )
         self._file_watcher_subscription_id = self._file_watcher.subscribe(
             self._handle_file_changes,
-            paths=[self.bot_config_path, self.model_config_path],
+            paths=[self.bot_config_path, self.model_config_path, policy_path],
         )
         await self._file_watcher.start()
         logger.info(t("config.file_watcher_started"))
@@ -672,7 +682,7 @@ class ConfigManager:
         self._file_watcher = None
 
     async def _handle_file_changes(self, changes: Sequence[FileChange]) -> None:
-        """处理主配置与模型配置文件变更。
+        """处理主配置、模型配置及适配器名单文件变更。
 
         Args:
             changes: 当前批次收集到的文件变更列表。
@@ -680,6 +690,12 @@ class ConfigManager:
 
         if not changes:
             return
+        from src.platform_io.adapter_policy import get_adapter_policy_manager
+
+        if any(change.path == get_adapter_policy_manager().policy_path.resolve() for change in changes):
+            from src.chat.heart_flow.heartflow_manager import heartflow_manager
+
+            await heartflow_manager.close_policy_blocked_chats()
         changed_scopes = self._resolve_changed_scopes(changes)
         if not changed_scopes:
             return
@@ -904,6 +920,8 @@ class _ConfigProxy:
 
 # generate_new_config_file(Config, BOT_CONFIG_PATH, CONFIG_VERSION)
 config_manager = ConfigManager()
-config_manager.initialize()
+# CLI 初始化只生成缺失文件；正常启动仍沿用原有加载和升级流程。
+if os.environ.get("MAIBOT_INITIALIZE_ONLY") != "1":
+    config_manager.initialize()
 global_config: Config = cast(Config, _ConfigProxy(config_manager.get_global_config))
 model_config: ModelConfig = cast(ModelConfig, _ConfigProxy(config_manager.get_model_config))

@@ -9,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useResolvedAvatarUrl } from '@/lib/avatar-url'
 import { cn } from '@/lib/utils'
 import type { SessionInfo, StageStatusInfo } from '@/routes/monitor/use-maisaka-monitor'
+import { StageStatusLabel } from '@/routes/monitor/StageStatusLabel'
 
 import type { ChatMessage, ChatTab, ObservedMessagePreview } from './types'
 import { getChatTabDisplayName } from './utils'
@@ -205,7 +206,9 @@ function ObservedConversationItem({
             </span>
           </div>
           {status?.stage && (
-            <p className="text-muted-foreground mt-0.5 truncate text-xs">{status.stage}</p>
+            <p className="text-muted-foreground mt-0.5 truncate text-xs">
+              <StageStatusLabel status={status} />
+            </p>
           )}
           <p className="text-muted-foreground mt-0.5 truncate text-xs">{previewText}</p>
         </div>
@@ -273,7 +276,7 @@ export function ChatWorkspaceSidebar({
       data-chat-workspace-sidebar="true"
       className={cn(
         'bg-card/90 supports-backdrop-filter:bg-card/70 flex h-full shrink-0 flex-col border-r backdrop-blur',
-        'w-60 xl:w-64',
+        'w-52 xl:w-56',
         className
       )}
     >

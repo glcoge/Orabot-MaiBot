@@ -130,14 +130,23 @@ const emojiManagementRoute = createRoute({
   ),
 })
 
-// 资源管理路由 - 表达方式管理
+// 资源管理路由 - 学习（表达方式与黑话）
+const learningRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: '/resource/learning',
+  validateSearch: (search: Record<string, unknown>): { tab: 'expression' | 'jargon' } => ({
+    tab: search.tab === 'jargon' ? 'jargon' : 'expression',
+  }),
+  component: lazyRouteComponent(() => import('./routes/resource/learning'), 'LearningPage'),
+})
+
+// 旧表达方式地址进入学习页的表达页签。
 const expressionManagementRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/resource/expression',
-  component: lazyRouteComponent(
-    () => import('./routes/resource/expression/index.tsx'),
-    'ExpressionManagementPage'
-  ),
+  beforeLoad: () => {
+    throw redirect({ to: '/resource/learning', search: { tab: 'expression' }, replace: true })
+  },
 })
 
 // 资源管理路由 - 人物信息管理
@@ -147,25 +156,16 @@ const personManagementRoute = createRoute({
   component: lazyRouteComponent(() => import('./routes/person'), 'PersonManagementPage'),
 })
 
-// 资源管理路由 - 黑话管理
+// 旧黑话地址进入学习页的黑话页签。
 const jargonManagementRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/resource/jargon',
-  component: lazyRouteComponent(
-    () => import('./routes/resource/jargon/index.tsx'),
-    'JargonManagementPage'
-  ),
+  beforeLoad: () => {
+    throw redirect({ to: '/resource/learning', search: { tab: 'jargon' }, replace: true })
+  },
 })
 
 // 资源管理路由 - 知识库图谱可视化
-const behaviorLearningRoute = createRoute({
-  getParentRoute: () => protectedRoute,
-  path: '/resource/behavior',
-  component: lazyRouteComponent(
-    () => import('./routes/resource/behavior/index.tsx'),
-    'BehaviorLearningPage'
-  ),
-})
 
 const knowledgeGraphRoute = createRoute({
   getParentRoute: () => protectedRoute,
@@ -206,10 +206,21 @@ const plannerMonitorRoute = createRoute({
   component: lazyRouteComponent(() => import('./routes/monitor/index.tsx'), 'PlannerMonitorPage'),
 })
 
+// 移动端管理页路由：底部标签栏「管理」，汇总侧栏的全部入口
+const manageRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: '/manage',
+  component: lazyRouteComponent(() => import('./routes/manage'), 'ManagePage'),
+})
+
 // 本地聊天室路由
 const chatRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/chat',
+  validateSearch: (search: Record<string, unknown>): { setupTrial?: boolean; observe?: string } => ({
+    setupTrial: search.setupTrial === true || search.setupTrial === 'true' ? true : undefined,
+    observe: typeof search.observe === 'string' && search.observe ? search.observe : undefined,
+  }),
   component: lazyRouteComponent(() => import('./routes/chat/index'), 'ChatPage'),
 })
 
@@ -382,9 +393,9 @@ const routeTree = rootRoute.addChildren([
     modelConfigRoute,
     promptManagementRoute,
     emojiManagementRoute,
+    learningRoute,
     expressionManagementRoute,
     jargonManagementRoute,
-    behaviorLearningRoute,
     personManagementRoute,
     knowledgeGraphRoute,
     knowledgeBaseRoute,
@@ -400,6 +411,7 @@ const routeTree = rootRoute.addChildren([
     plannerMonitorRoute,
     chatManagementRoute,
     chatRoute,
+    manageRoute,
     settingsRoute,
     packMarketRoute,
     packDetailRoute,

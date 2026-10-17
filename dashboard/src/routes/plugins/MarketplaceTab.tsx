@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 
 import type {
   GitStatus,
@@ -13,6 +13,7 @@ import { PluginCard } from './PluginCard'
 
 const SURPRISE_PLUGIN_COUNT = 4
 const SURPRISE_CANDIDATE_LIMIT = 20
+const SURPRISE_SEED_STORAGE_KEY = 'plugins-market-surprise-seed'
 const FRESHNESS_BOOST_WEIGHT = 4
 const FRESHNESS_BOOST_WINDOW_DAYS = 120
 const LAUNCH_BOOST_WEIGHT = 12
@@ -20,6 +21,9 @@ const LAUNCH_BOOST_FULL_HOURS = 24
 const LAUNCH_BOOST_DECAY_HOURS = 48
 const UPDATE_BOOST_WEIGHT = 3
 const UPDATE_BOOST_WINDOW_DAYS = 14
+const GROWTH_BOOST_RANK_LIMIT = 8
+const GROWTH_BOOST_WEIGHT_7D = 1
+const GROWTH_BOOST_WEIGHT_30D = 0.6
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 const MS_PER_HOUR = 60 * 60 * 1000
 
@@ -35,7 +39,6 @@ interface MarketplaceTabProps {
   searchQuery: string
   pluginTypeFilter: string
   showCompatibleOnly: boolean
-  hideInstalledPlugins: boolean
   sortBy: MarketplaceSortKey
   gitStatus: GitStatus | null
   maimaiVersion: MaimaiVersion | null
@@ -53,6 +56,13 @@ interface MarketplaceTabProps {
   needsUpdate: (plugin: PluginInfo) => boolean
   getStatusBadge: (plugin: PluginInfo) => React.JSX.Element | null
   getIncompatibleReason: (plugin: PluginInfo) => string | null
+}
+
+function getMarketplaceColumnCount(): number {
+  if (window.matchMedia('(min-width: 1280px)').matches) return 4
+  if (window.matchMedia('(min-width: 768px)').matches) return 3
+  if (window.matchMedia('(min-width: 640px)').matches) return 2
+  return 1
 }
 
 function getPluginIdentity(plugin: PluginInfo): string {
@@ -186,6 +196,24 @@ function normalizeScore(value: number, maxValue: number, weight: number): number
   return (value / maxValue) * weight
 }
 
+function getGrowthBoost(stats: PluginStatsData | undefined): number {
+  if (!stats) return 0
+
+  const rankings = [
+    { rank: stats.downloads_growth_rank_7d, weight: GROWTH_BOOST_WEIGHT_7D },
+    { rank: stats.likes_growth_rank_7d, weight: GROWTH_BOOST_WEIGHT_7D },
+    { rank: stats.downloads_growth_rank_30d, weight: GROWTH_BOOST_WEIGHT_30D },
+    { rank: stats.likes_growth_rank_30d, weight: GROWTH_BOOST_WEIGHT_30D },
+  ]
+  // 仅为前八名小幅加权，取最强的一项，避免多个榜单的加成叠加。
+  return rankings.reduce((boost, { rank, weight }) => {
+    if (rank == null || !Number.isInteger(rank) || rank < 1 || rank > GROWTH_BOOST_RANK_LIMIT) {
+      return boost
+    }
+    return Math.max(boost, ((GROWTH_BOOST_RANK_LIMIT + 1 - rank) / GROWTH_BOOST_RANK_LIMIT) * weight)
+  }, 0)
+}
+
 function getStableRandomRank(seed: string, plugin: PluginInfo): number {
   const value = `${seed}:${getPluginIdentity(plugin)}`
   let hash = 2166136261
@@ -226,12 +254,11 @@ function selectSurprisePlugins(
     .slice(0, SURPRISE_PLUGIN_COUNT)
 }
 
-export function MarketplaceTab({
+export const MarketplaceTab = memo(function MarketplaceTab({
   plugins,
   searchQuery,
   pluginTypeFilter,
   showCompatibleOnly,
-  hideInstalledPlugins,
   sortBy,
   gitStatus,
   maimaiVersion,
@@ -249,7 +276,21 @@ export function MarketplaceTab({
   getStatusBadge,
   getIncompatibleReason,
 }: MarketplaceTabProps) {
-  const [surpriseSeed] = useState(() => Math.random().toString(36).slice(2))
+  const [columnCount, setColumnCount] = useState(getMarketplaceColumnCount)
+  useEffect(() => {
+    const queries = [640, 768, 1280].map((width) => window.matchMedia(`(min-width: ${width}px)`))
+    const updateColumns = () => setColumnCount(getMarketplaceColumnCount())
+    queries.forEach((query) => query.addEventListener('change', updateColumns))
+    return () => queries.forEach((query) => query.removeEventListener('change', updateColumns))
+  }, [])
+  const [surpriseSeed] = useState(() => {
+    // 同一浏览器会话沿用抽选种子，返回市场或重挂载时不重新抽选推荐位。
+    const savedSeed = sessionStorage.getItem(SURPRISE_SEED_STORAGE_KEY)
+    if (savedSeed) return savedSeed
+    const seed = Math.random().toString(36).slice(2)
+    sessionStorage.setItem(SURPRISE_SEED_STORAGE_KEY, seed)
+    return seed
+  })
   const [renderTime] = useState(() => Date.now())
 
   // 过滤插件
@@ -281,6 +322,7 @@ export function MarketplaceTab({
         normalizeScore(ratingScore, scoreBasis.maxRatingScore, 2) +
         getLaunchBoost(plugin, now) +
         getUpdateBoost(plugin, now) +
+        getGrowthBoost(stats) +
         getFreshnessBoost(plugin, scoreBasis.maxMarketplaceOrder, now)
       )
     }
@@ -309,10 +351,6 @@ export function MarketplaceTab({
 
     // 全部插件只展示 plugin-repo 中存在的市场插件，本地独有插件只在“已安装”显示。
     if (plugin.source === 'local') {
-      return false
-    }
-
-    if (hideInstalledPlugins && plugin.installed) {
       return false
     }
 
@@ -377,6 +415,10 @@ export function MarketplaceTab({
     (plugin) => !surprisePluginIds.has(getPluginIdentity(plugin))
   )
   const displayPlugins = [...surprisePlugins, ...mainPlugins]
+  const pluginRows: PluginInfo[][] = []
+  for (let index = 0; index < displayPlugins.length; index += columnCount) {
+    pluginRows.push(displayPlugins.slice(index, index + columnCount))
+  }
   const isAnyPluginInstalling = Object.values(pluginProgressById).some(
     (progress) => progress.operation === 'install' && progress.stage === 'loading'
   )
@@ -404,8 +446,17 @@ export function MarketplaceTab({
   )
 
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 2xl:grid-cols-4">
-      {displayPlugins.map(renderPluginCard)}
+    // 各行内部共享网格轨道；屏幕外行交给浏览器跳过布局和绘制，保留 DOM 与滚动状态。
+    <div className="flex flex-col gap-3">
+      {pluginRows.map((row) => (
+        <div
+          key={getPluginIdentity(row[0])}
+          className="-m-2 grid grid-cols-1 gap-3 p-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4"
+          style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 200px' }}
+        >
+          {row.map(renderPluginCard)}
+        </div>
+      ))}
     </div>
   )
-}
+})

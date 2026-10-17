@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Generator, List, Optional, Tuple
+from unittest.mock import AsyncMock, Mock
 
 import asyncio
 import json
@@ -26,6 +27,29 @@ from src.webui.routers.plugin import config_routes as config_routes_module
 from src.webui.routers.plugin import icon_routes as icon_routes_module
 from src.webui.routers.plugin import management as management_module
 from src.webui.routers.plugin import support as support_module
+
+
+@pytest.mark.parametrize("contents", [b"{invalid json", b"\xff", b"[]"])
+def test_invalid_manifest_preserves_diagnostics(tmp_path: Path, monkeypatch, contents: bytes) -> None:
+    manifest_path = tmp_path / "_manifest.json"
+    manifest_path.write_bytes(contents)
+    logger = Mock()
+    monkeypatch.setattr(support_module, "logger", logger)
+
+    assert support_module.load_manifest_json(manifest_path) is None
+    logger.warning.assert_called_once()
+    assert str(manifest_path) in logger.warning.call_args.args[0]
+    if contents != b"[]":
+        assert logger.warning.call_args.kwargs["exc_info"] is True
+
+
+def test_manifest_loader_does_not_hide_unexpected_errors(tmp_path: Path, monkeypatch) -> None:
+    manifest_path = tmp_path / "_manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(support_module.json, "load", Mock(side_effect=RuntimeError("unexpected loader failure")))
+
+    with pytest.raises(RuntimeError, match="unexpected loader failure"):
+        support_module.load_manifest_json(manifest_path)
 
 
 @pytest.fixture
@@ -145,11 +169,12 @@ def test_toggle_plugin_applies_enabled_state_before_returning(client: TestClient
         config_data: Optional[Dict[str, Any]] = None,
         *,
         use_provided_config: bool = False,
-    ) -> SimpleNamespace:
+    ) -> InspectPluginConfigResultPayload:
         assert plugin_id == "test.demo"
         assert config_data is None
         assert use_provided_config is False
-        return SimpleNamespace(
+        return InspectPluginConfigResultPayload(
+            success=True,
             enabled=False,
             normalized_config={"plugin": {"enabled": False}},
         )
@@ -181,6 +206,12 @@ def test_toggle_plugin_applies_enabled_state_before_returning(client: TestClient
 
 
 def test_toggle_exposes_runtime_failure_instead_of_reporting_success(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setattr(
+        config_routes_module,
+        "_inspect_plugin_config_via_runtime",
+        AsyncMock(return_value=InspectPluginConfigResultPayload(success=True)),
+    )
+
     async def fail(plugin_id, write_config):
         await write_config()
         raise RuntimeError("模拟插件加载失败")
@@ -426,7 +457,7 @@ def test_get_plugin_icon_rejects_manifest_declared_parent_path(client: TestClien
     assert response.status_code == 400
 
 
-def test_install_plugin_preserves_manifest_declared_id(client: TestClient, monkeypatch):
+def test_install_plugin_rejects_mismatching_manifest_id(client: TestClient, monkeypatch):
     class FakeGitMirrorService:
         async def clone_repository(self, **kwargs):
             target_path = kwargs["target_path"]
@@ -456,14 +487,12 @@ def test_install_plugin_preserves_manifest_declared_id(client: TestClient, monke
         },
     )
 
-    assert response.status_code == 200
-    plugin_path = support_module.resolve_installed_plugin_path("author.declared")
-    assert plugin_path is not None
-    manifest = json.loads((plugin_path / "_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["id"] == "author.declared"
+    assert response.status_code == 400
+    assert "插件 ID 不匹配" in response.json()["detail"]
+    assert not support_module.get_plugin_candidate_paths("market.plugin")[0].exists()
 
 
-def test_install_plugin_backfills_missing_manifest_id(client: TestClient, monkeypatch):
+def test_install_plugin_rejects_missing_manifest_id(client: TestClient, monkeypatch):
     class FakeGitMirrorService:
         async def clone_repository(self, **kwargs):
             target_path = kwargs["target_path"]
@@ -492,11 +521,9 @@ def test_install_plugin_backfills_missing_manifest_id(client: TestClient, monkey
         },
     )
 
-    assert response.status_code == 200
-    plugin_path = support_module.resolve_installed_plugin_path("market.legacy")
-    assert plugin_path is not None
-    manifest = json.loads((plugin_path / "_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["id"] == "market.legacy"
+    assert response.status_code == 400
+    assert "缺少必需字段: id" in response.json()["detail"]
+    assert not support_module.get_plugin_candidate_paths("market.legacy")[0].exists()
 
 
 def test_install_plugin_cleans_config_only_residue(client: TestClient, monkeypatch):
@@ -559,12 +586,12 @@ def test_clone_repository_reports_plugin_and_mirror_progress(tmp_path, monkeypat
     async def collect_progress(**kwargs):
         events.append(kwargs)
 
-    def fake_run(cmd, capture_output, text, timeout):
+    async def fake_run(cmd, cwd=None):
         assert cmd[:2] == ["git", "clone"]
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     service = mirror_service_module.GitMirrorService(max_retries=1, timeout=1, config=FakeMirrorConfig())
-    monkeypatch.setattr(mirror_service_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(mirror_service_module, "_run_git_process", fake_run)
     mirror_service_module.set_update_progress_callback(collect_progress)
 
     try:
@@ -589,14 +616,14 @@ def test_clone_repository_reports_plugin_and_mirror_progress(tmp_path, monkeypat
 def test_clone_repository_cleans_partial_directory_on_git_failure(tmp_path, monkeypatch):
     target_path = tmp_path / "bad_plugin"
 
-    def fake_run(cmd, capture_output, text, timeout):
+    async def fake_run(cmd, cwd=None):
         assert cmd[:2] == ["git", "clone"]
         target_path.mkdir(parents=True, exist_ok=True)
         (target_path / ".git").mkdir()
         return SimpleNamespace(returncode=128, stdout="", stderr="network failed")
 
     service = mirror_service_module.GitMirrorService(max_retries=1, timeout=1)
-    monkeypatch.setattr(mirror_service_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(mirror_service_module, "_run_git_process", fake_run)
 
     result = asyncio.run(
         service._clone_with_url(
@@ -772,3 +799,99 @@ def test_plugin_operation_reservation_releases_after_failure(client: TestClient)
 
     with management_module._reserve_plugin_operation("test.demo", "update"):
         pass
+
+
+def test_update_disconnect_cancels_worker_and_waits_for_cleanup(monkeypatch) -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        cleaned = asyncio.Event()
+        progress = []
+
+        async def worker(request, token):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                cleaned.set()
+
+        class DisconnectedRequest:
+            async def receive(self) -> Dict[str, Any]:
+                await started.wait()
+                return {"type": "http.disconnect"}
+
+        async def record_progress(**kwargs):
+            progress.append(kwargs)
+
+        monkeypatch.setattr(management_module, "require_plugin_token", lambda _: "ok")
+        monkeypatch.setattr(management_module, "_perform_update_plugin", worker)
+        monkeypatch.setattr(management_module, "update_progress", record_progress)
+        request = management_module.UpdatePluginRequest(
+            plugin_id="test.demo", repository_url="https://github.com/test/demo", branch="main",
+        )
+        with pytest.raises(management_module.HTTPException) as error:
+            await management_module.update_plugin(request, "ok", DisconnectedRequest())
+        assert error.value.status_code == 499
+        assert cleaned.is_set()
+        assert progress[-1]["message"] == "更新已取消"
+
+    asyncio.run(scenario())
+
+
+def test_cancel_git_process_terminates_process_before_returning(monkeypatch) -> None:
+    async def scenario() -> None:
+        processes = []
+        original_popen = mirror_service_module.subprocess.Popen
+
+        def capture_process(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        monkeypatch.setattr(mirror_service_module.subprocess, "Popen", capture_process)
+        task = asyncio.create_task(mirror_service_module._run_git_process(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+        ))
+        while not processes:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert processes[0].poll() is not None
+
+    asyncio.run(scenario())
+
+
+def test_cancel_non_git_update_preserves_plugin_and_removes_candidate(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        plugin_path = tmp_path / "demo"
+        plugin_path.mkdir()
+        (plugin_path / "plugin.py").write_text("old source", encoding="utf-8")
+        manifest = {"id": "test.demo", "version": "1.0.0"}
+        candidate_paths = []
+        started = asyncio.Event()
+
+        async def clone(request, target_path):
+            target_path.mkdir()
+            (target_path / "partial").write_text("partial download", encoding="utf-8")
+            candidate_paths.append(target_path)
+            started.set()
+            await asyncio.Event().wait()
+
+        async def progress(**kwargs):
+            pass
+
+        monkeypatch.setattr(management_module, "_clone_plugin_repository_for_update", clone)
+        monkeypatch.setattr(management_module, "update_progress", progress)
+        request = management_module.UpdatePluginRequest(plugin_id="test.demo")
+        task = asyncio.create_task(management_module._update_non_git_plugin(
+            "test.demo", plugin_path, manifest, request,
+        ))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert (plugin_path / "plugin.py").read_text(encoding="utf-8") == "old source"
+        assert not candidate_paths[0].exists()
+
+    asyncio.run(scenario())

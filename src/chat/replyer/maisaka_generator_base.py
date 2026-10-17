@@ -2,6 +2,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+import asyncio
 import random
 import re
 import time
@@ -30,7 +31,6 @@ from src.common.utils.utils_config import ChatConfigUtils
 from src.config.config import global_config
 from src.maisaka.context.message_id_alias import to_display_message_id
 from src.config.model_configs import ModelInfo
-from src.config.official_configs import build_personality_emotion_suffix
 from src.core.types import ActionInfo
 from src.llm_models.payload_content.context_item import (
     AssistantMessageItem,
@@ -44,6 +44,7 @@ from src.llm_models.payload_content.context_item import (
 )
 from src.llm_models.payload_content.context_protocol import ContextProtocolMode
 from src.llm_models.request_snapshot import serialize_context_items_snapshot
+from src.maisaka.attention_drift import build_attention_drift_prompt_block
 from src.maisaka.context.message_adapter import parse_speaker_content
 from src.maisaka.context.messages import (
     LLMContextMessage,
@@ -57,6 +58,7 @@ from src.maisaka.context.planner_messages import extract_quote_ids_from_message_
 from src.maisaka.display.prompt_cli_renderer import PromptCLIVisualizer
 from src.maisaka.memory.mid_term import is_mid_term_memory_message
 from src.maisaka.visual.message_limiter import limit_latest_images_in_messages
+from src.maisaka.visual.mode_utils import resolve_enable_visual_planner
 from src.plugin_runtime.hook_payloads import deserialize_prompt_items, serialize_prompt_items
 
 from .maisaka_expression_selector import maisaka_expression_selector
@@ -110,11 +112,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
             if not prompt_personality:
                 prompt_personality = "是人类。"
 
-            prompt_lines = [f"你的名字是{bot_name}{bot_aliases}。", prompt_personality]
-            emotion_suffix = build_personality_emotion_suffix(global_config.experimental.emotion_trait)
-            if emotion_suffix:
-                prompt_lines.append(emotion_suffix)
-            return "\n".join(prompt_lines)
+            return f"你的名字是{bot_name}{bot_aliases}。\n{prompt_personality}"
         except Exception as exc:
             logger.warning(f"构建 Maisaka 人设提示词失败: {exc}")
             return "你的名字是麦麦。\n是人类。"
@@ -372,15 +370,8 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         ]
         if image_targets:
             lines.append(
-                f"除了当前你输出的回复，你还会（由另一个模型控制）发送图片{self._join_chinese_items(image_targets)}。"
+                f"当前文字回复后还会另外发送图片{self._join_chinese_items(image_targets)}。"
             )
-
-        at_targets = [
-            self._format_attachment_at_target(raw_target, chat_history, reply_message)
-            for raw_target in self._normalize_attachment_items(reply_tool_args.get("attach_at"))
-        ]
-        if at_targets:
-            lines.append(f"除了当前你输出的回复，你还会（由另一个模型控制）at {self._join_chinese_items(at_targets)}。")
 
         raw_emoji = str(reply_tool_args.get("attach_emoji") or "").strip()
         if raw_emoji:
@@ -564,6 +555,8 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         except Exception:
             system_prompt = "你是一个友好的 AI 助手，请根据聊天记录自然回复。"
 
+        if attention_drift := build_attention_drift_prompt_block():
+            system_prompt += f"\n\n{attention_drift}"
         return system_prompt
 
     def _build_reply_instruction(self) -> str:
@@ -684,7 +677,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         reply_tool_args: Optional[Dict[str, Any]] = None,
         think_level: int = 1,
     ) -> List[ContextItem]:
-        # 复古模式把所有回复指令集中到一份完整模板里，整段作为一条 user 消息发送
+        # 复古模式将人设与注意事项放在首条 system 消息，其余模板作为一条 user 消息发送
         if global_config.experimental.replyer_retro_prompt:
             return self._build_retro_request_messages(
                 chat_history=chat_history,
@@ -695,6 +688,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
                 stream_id=stream_id,
                 think_level=think_level,
                 reply_tool_args=reply_tool_args,
+                enable_visual_message=enable_visual_message,
             )
 
         items: List[ContextItem] = []
@@ -1016,6 +1010,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         selected_expressions: Optional[List[Dict[str, Any]]] = None,
         sub_agent_runner: Optional[Callable[[str], Awaitable[str]]] = None,
         reply_tool_args: Optional[Dict[str, Any]] = None,
+        image_recognition_refresher: Optional[Callable[[List[LLMContextMessage]], Awaitable[int]]] = None,
     ) -> Tuple[bool, ReplyGenerationResult]:
         def finalize(success_value: bool) -> Tuple[bool, ReplyGenerationResult]:
             self._persist_reply_preview(result, stream_id=stream_id, reply_reason=reply_reason)
@@ -1170,14 +1165,27 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
                 api_provider = getattr(_client, "api_provider", None)
                 active_client_type = str(getattr(api_provider, "client_type", "") or "")
                 prompt_started_at = time.perf_counter()
-                built_request_messages = self._build_request_messages(
+                enable_visual_message = self._resolve_enable_visual_message(model_info)
+                # 视觉 planner 不等待识图；纯文本 replyer 在实际模型选定后补做相同的刷新和等待。
+                if (
+                    not enable_visual_message
+                    and resolve_enable_visual_planner()
+                    and image_recognition_refresher is not None
+                ):
+                    await image_recognition_refresher(chat_history)
+                    filtered_history[:] = [
+                        message for message in chat_history if self._should_keep_replyer_history_message(message)
+                    ]
+                # 视觉请求构建会解码、缩放和编码图片，在工作线程中执行，避免阻塞聊天事件循环。
+                built_request_messages = await asyncio.to_thread(
+                    self._build_request_messages,
                     chat_history=filtered_history,
                     reply_message=reply_message,
                     reply_reason=reply_reason or "",
                     expression_habits=merged_expression_habits,
                     reply_requirements=reply_requirements_for_attempt,
                     stream_id=stream_id,
-                    enable_visual_message=self._resolve_enable_visual_message(model_info),
+                    enable_visual_message=enable_visual_message,
                     reply_tool_args=dict(reply_tool_args_for_attempt),
                     think_level=think_level,
                 )
@@ -1437,11 +1445,9 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         if hook_rewrite_events:
             result.metrics.extra["replyer_hook_rewrite_events"] = list(hook_rewrite_events)
         logger.info(
-            "Replyer缓存："
-            f"命中={prompt_cache_hit_tokens}, "
-            f"未命中={prompt_cache_miss_tokens}, "
-            f"命中率={prompt_cache_hit_rate:.2f}%, "
-            f"token使用={generation_result.prompt_tokens}"
+            f"Replyer缓存 输入={generation_result.prompt_tokens} "
+            f"命中={prompt_cache_hit_tokens} 未命中={prompt_cache_miss_tokens} "
+            f"命中率={prompt_cache_hit_rate:.2f}%"
         )
 
         if not result.success:
@@ -1450,9 +1456,8 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
             return finalize(False)
 
         logger.info(
-            f"Maisaka 回复器生成成功 文本={response_text!r} "
-            f"总耗时ms={result.metrics.overall_ms} 重生成次数={retry_count} "
-            f"推理续写次数={reasoning_continuation_count} "
+            f"回复生成完成 耗时={result.metrics.overall_ms / 1000:.2f}s "
+            f"重生成={retry_count} 续写={reasoning_continuation_count} "
             f"已选表达={result.selected_expression_ids!r}"
         )
         if retry_count > 0:

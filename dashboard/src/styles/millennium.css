@@ -181,9 +181,15 @@
   width: auto;
 }
 
-/* 桌面侧栏铭牌与顶栏同步收起到 16px，导航随之上移。 */
+/* 桌面侧栏铭牌与顶栏展开时同为 52px，同步收起到 16px，导航随之上移。 */
 @media (min-width: 1024px) {
+  /* 顶栏固定为 52px，侧栏局部同步高度，避免已保存的主题尺寸覆盖默认 token。 */
+  :root[data-dashboard-style='millennium'] [data-dashboard-sidebar='true'] {
+    --layout-sidebar-logo-height: 52px;
+  }
+
   :root[data-dashboard-style='millennium'] [data-dashboard-logo-area='true'] {
+    height: var(--layout-sidebar-logo-height);
     overflow: hidden;
     transition: height 180ms cubic-bezier(0.22, 1, 0.36, 1);
   }
@@ -246,6 +252,7 @@
   align-items: stretch;
   border: 2px solid var(--mil-line);
   gap: 0;
+  translate: none;
   transform: none;
 }
 
@@ -286,15 +293,20 @@
   :root[data-dashboard-style='millennium'] [data-dashboard-sidebar-section-title='true'] {
     font-size: 0.625rem;
     letter-spacing: 0.02em;
-    line-height: 1.4;
+    line-height: 1.2;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
   }
 
-  /* 中文分组统一为两行，每行两个字，与下方图标中心对齐。 */
+  /* 中文标题使用整列宽度，短标题保持一行，长标题自然换行并与图标中心对齐。 */
   :root[data-dashboard-style='millennium'] [data-dashboard-sidebar-title-stacked='true'] {
     letter-spacing: 0;
     margin-inline: auto;
-    width: 2em;
-    word-break: break-all;
+    width: auto;
+    max-width: 100%;
+    word-break: normal;
   }
 }
 
@@ -371,8 +383,8 @@
   box-shadow: var(--mil-keycap);
   color: var(--mil-ink);
   font-weight: 700;
-  height: 2.875rem;
-  padding-bottom: 5px;
+  height: 2.25rem;
+  padding-bottom: 3px;
   padding-top: 0;
   transform: none;
 }
@@ -380,22 +392,25 @@
 :root[data-dashboard-style='millennium']
   [data-dashboard-header='true']
   [data-dashboard-tabs-trigger='true'] {
-  padding-left: 0.875rem;
-  padding-right: 0.875rem;
+  padding-left: 0.625rem;
+  padding-right: 0.625rem;
+  box-shadow:
+    inset 0 0 0 2px var(--mil-line), inset 0 -5px 0 var(--mil-key-side),
+    inset 3px 3px 0 var(--mil-key-hi);
 }
 
 :root[data-dashboard-style='millennium']
   [data-dashboard-header='true']
   [data-dashboard-tabs-trigger='true']
   span {
-  font-size: 0.875rem;
+  font-size: 0.75rem;
   letter-spacing: 0;
 }
 
 :root[data-dashboard-style='millennium']
   [data-dashboard-header='true']
   [data-dashboard-header-action='true'] {
-  width: 2.875rem;
+  width: 2.25rem;
 }
 
 :root[data-dashboard-style='millennium']
@@ -469,6 +484,17 @@
   border-radius: 0 !important;
 }
 
+/* 普通信息面板沿用粗描边；低优先级让各页面的选中、告警及无边框样式继续生效。 */
+:root[data-dashboard-style='millennium']
+  :where(div, section, aside, label, pre, code):where(.border) {
+  border-width: 2px;
+}
+
+:root[data-dashboard-style='millennium']
+  :where(div, section, aside, label, pre, code):where(.border-border) {
+  border-color: var(--mil-line);
+}
+
 /* ---------- 凸起的塑料模块：卡片 ---------- */
 
 :root[data-dashboard-style='millennium'] [data-dashboard-card='true'] {
@@ -492,7 +518,7 @@
 /* 没用 Card 组件、直接写 bg-card + border 的面板：同样是塑料面，但不加底部厚度 */
 :root[data-dashboard-style='millennium']
   [data-dashboard-shell]
-  .bg-card.border:not([data-dashboard-card='true']) {
+  .bg-card.border:not([data-dashboard-card='true'], [data-memory-timeline-event='true']) {
   border: 2px solid var(--mil-line);
   box-shadow: var(--mil-bevel);
 }
@@ -513,6 +539,26 @@
   letter-spacing: 0.14em;
 }
 
+:root[data-dashboard-style='millennium']
+  [data-plugin-market-card='true']
+  [data-dashboard-card-title='true'] {
+  color: var(--mil-ink);
+  font-size: 0.9375rem;
+}
+
+:root[data-dashboard-style='millennium']
+  [data-plugin-market-card='true'][data-plugin-installed='true'] {
+  border-color: var(--mil-hot);
+}
+
+/* 市场卡片减少标题区与统计区之间的留白。 */
+:root[data-dashboard-style='millennium']
+  [data-plugin-market-card='true']
+  > [data-dashboard-card-header='true'] {
+  margin-bottom: 0.375rem;
+  padding: 0.625rem 0.75rem 0.5rem;
+}
+
 /* ---------- 键帽：按钮 ---------- */
 
 :root[data-dashboard-style='millennium'] [data-dashboard-button='true'] {
@@ -525,7 +571,7 @@
 :root[data-dashboard-style='millennium']
   [data-dashboard-button='true']:is(.border-input, .bg-secondary, .bg-primary, .bg-destructive) {
   background-color: var(--mil-key);
-  border-color: transparent;
+  border-color: var(--mil-line);
   box-shadow: var(--mil-keycap);
   color: var(--mil-ink);
 }
@@ -619,11 +665,18 @@
 
 /* ---------- 下沉屏幕：输入框、多行文本、下拉触发器 ---------- */
 
+:root[data-dashboard-style='millennium'] select:not(.opacity-0) {
+  border-radius: 0;
+  font-family: inherit;
+}
+
 :root[data-dashboard-style='millennium']
   :is(
     [data-dashboard-input='true'],
     [data-dashboard-select-trigger='true'],
+    [data-dashboard-date-time-trigger='true'],
     textarea,
+    select:not(.opacity-0),
     [data-dashboard-code-editor='true']
   ) {
   background-color: var(--mil-screen);
@@ -635,7 +688,11 @@
 }
 
 :root[data-dashboard-style='millennium']
-  :is([data-dashboard-input='true'], [data-dashboard-select-trigger='true']).h-9 {
+  :is(
+    [data-dashboard-input='true'],
+    [data-dashboard-select-trigger='true'],
+    [data-dashboard-date-time-trigger='true']
+  ).h-9 {
   height: 2.875rem;
 }
 
@@ -648,13 +705,71 @@
   :is(
     [data-dashboard-input='true'],
     [data-dashboard-select-trigger='true'],
-    textarea
+    [data-dashboard-date-time-trigger='true'],
+    textarea,
+    select:not(.opacity-0)
   ):focus-visible {
   outline: 2px solid var(--mil-on-side);
   outline-offset: 1px;
 }
 
 /* ---------- 浮层：下拉、菜单、弹窗、提示 ---------- */
+
+/* 日期选择器用下沉日历屏幕和方形键帽，不调用浏览器原生弹窗。 */
+:root[data-dashboard-style='millennium'] [data-date-time-picker='true'] [data-slot='calendar'] {
+  background-color: var(--mil-screen);
+  background-image: var(--mil-screen-tex);
+  background-size: 3px 3px;
+  border: 2px solid var(--mil-line);
+  box-shadow: inset 3px 3px 0 var(--mil-screen-shade);
+  color: var(--mil-screen-ink);
+}
+
+:root[data-dashboard-style='millennium'] [data-date-time-picker='true']
+  :is(.rdp-week, .rdp-weekdays) {
+  gap: 3px;
+}
+
+:root[data-dashboard-style='millennium'] [data-date-time-picker='true'] .rdp-week {
+  margin-top: 3px;
+}
+
+:root[data-dashboard-style='millennium'] [data-date-time-picker='true']
+  :is(.rdp-day button, .rdp-nav button) {
+  background-color: var(--mil-key);
+  box-shadow: inset 0 0 0 2px var(--mil-line), inset 0 -3px 0 var(--mil-key-side);
+  color: var(--mil-ink);
+  font-weight: 700;
+  height: 2rem;
+  min-width: 2rem;
+  padding: 0 0 3px;
+}
+
+:root[data-dashboard-style='millennium'] [data-date-time-picker='true'] .rdp-day button:hover {
+  background-color: var(--mil-key-hover);
+}
+
+:root[data-dashboard-style='millennium'] [data-date-time-picker='true'] .rdp-today {
+  background-color: transparent;
+}
+
+:root[data-dashboard-style='millennium'] [data-date-time-picker='true'] .rdp-today button {
+  outline: 2px solid var(--mil-on-side);
+  outline-offset: -4px;
+}
+
+:root[data-dashboard-style='millennium'] [data-date-time-picker='true'] .rdp-outside button {
+  color: var(--mil-screen-dim);
+  opacity: 0.5;
+}
+
+:root[data-dashboard-style='millennium'] [data-date-time-picker='true']
+  .rdp-day button[data-selected-single='true'] {
+  background-color: var(--mil-on);
+  box-shadow: var(--mil-pressed);
+  color: var(--mil-on-ink);
+  opacity: 1;
+}
 
 :root[data-dashboard-style='millennium']
   :is(
@@ -696,6 +811,11 @@
 :root[data-dashboard-style='millennium'] [data-dashboard-tabs-list='true'] {
   background-color: transparent;
   gap: 0.5rem;
+}
+
+/* 迷你标签页直接铺在机壳上，只保留各键帽的描边。 */
+:root[data-dashboard-style='millennium'] [data-memory-mini-tabs='true'] {
+  border: 0;
 }
 
 :root[data-dashboard-style='millennium']
@@ -765,12 +885,47 @@
   box-shadow: none;
 }
 
-:root[data-dashboard-style='millennium'] [data-dashboard-checkbox='true'] {
+:root[data-dashboard-style='millennium'] [data-dashboard-checkbox='true'],
+:root[data-dashboard-style='millennium'] input[type='checkbox'] {
   background-color: var(--mil-screen);
   border: 2px solid var(--mil-line);
   box-shadow: inset 2px 2px 0 var(--mil-screen-shade);
   height: 1.25rem;
   width: 1.25rem;
+}
+
+:root[data-dashboard-style='millennium'] input[type='checkbox'] {
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  flex-shrink: 0;
+  border-radius: 0;
+  vertical-align: middle;
+  color: var(--mil-on-ink);
+}
+
+:root[data-dashboard-style='millennium'] input[type='checkbox']:checked {
+  background: var(--mil-on);
+  box-shadow: none;
+}
+
+:root[data-dashboard-style='millennium'] input[type='checkbox']:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+:root[data-dashboard-style='millennium'] input[type='checkbox']:checked::before {
+  content: '';
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: translateY(-1px) rotate(-45deg);
+}
+
+:root[data-dashboard-style='millennium'] input[type='checkbox']:focus-visible {
+  outline: 2px solid var(--mil-on-side);
+  outline-offset: 2px;
 }
 
 :root[data-dashboard-style='millennium']
@@ -903,6 +1058,7 @@
 @supports selector(::-webkit-scrollbar) {
   :root[data-dashboard-style='millennium'] * {
     scrollbar-color: auto;
+    scrollbar-width: auto;
   }
 
   :root[data-dashboard-style='millennium'] *::-webkit-scrollbar {
@@ -1214,7 +1370,7 @@
     [data-plugin-market-card='true']
   ) {
   border-radius: 0 !important;
-  box-shadow: 0 5px 0 var(--mil-drop) !important;
+  box-shadow: 0 var(--plugin-market-depth, 5px) 0 var(--mil-drop) !important;
 }
 
 :root[data-dashboard-style='millennium']
@@ -1396,6 +1552,202 @@
 
 /* ---------- 长期记忆：记录列表是一整块屏幕 ---------- */
 
+/* 记忆页顶部键帽与筛选控件收紧，不沿用全局加高尺寸。 */
+:root[data-dashboard-style='millennium'] [data-dashboard-main='true']
+  [data-memory-console-tab-row='true']
+  :is([data-dashboard-tabs-list='true'], [data-dashboard-tabs-trigger='true']) {
+  height: 2.25rem;
+  min-height: 2.25rem;
+  padding-block: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-dashboard-main='true']
+  [data-memory-console-tab-row='true'] [data-dashboard-tabs-trigger='true'] {
+  padding-bottom: 5px;
+}
+
+:root[data-dashboard-style='millennium'] [data-dashboard-main='true'] [data-memory-timeline-panel='true']
+  :is([data-dashboard-button='true'], [data-dashboard-select-trigger='true'], [data-dashboard-date-time-trigger='true']):is(.h-8, .h-9, .h-10) {
+  height: 2.25rem;
+  min-height: 2.25rem;
+}
+
+:root[data-dashboard-style='millennium'] [data-dashboard-main='true'] [data-memory-timeline-panel='true']
+  [data-dashboard-button='true'].w-8 {
+  width: 2.25rem;
+}
+
+/* 合并后的分页底栏使用更矮的键帽与下拉框。 */
+:root[data-dashboard-style='millennium'] [data-dashboard-main='true'] [data-memory-timeline-panel='true']
+  [data-memory-timeline-pagination='true']
+  :is([data-dashboard-button='true'], [data-dashboard-select-trigger='true']) {
+  height: 1.875rem;
+  min-height: 1.875rem;
+  padding-inline: 0.5rem;
+  font-size: 0.75rem;
+}
+
+/* 记忆流与抹除列表共用下沉白底，横线分隔条目，不重复堆叠卡片外框。 */
+:root[data-dashboard-style='millennium']
+  :is(
+    [data-memory-timeline-list='true'],
+    [data-memory-timeline-evidence='true'],
+    [data-memory-delete-screen='true']
+  ) {
+  background-color: var(--mil-screen);
+  background-image: var(--mil-screen-tex);
+  background-size: 3px 3px;
+  border: 2px solid var(--mil-line);
+  box-shadow: var(--mil-sunk);
+  color: var(--mil-screen-ink);
+}
+
+:root[data-dashboard-style='millennium']
+  :is([data-memory-timeline-event='true'], [data-memory-delete-operation='true']) {
+  background-color: transparent;
+  background-image: none;
+  border: 0;
+  border-bottom: 2px solid var(--mil-rule);
+  box-shadow: none;
+  margin: 0;
+}
+
+:root[data-dashboard-style='millennium']
+  :is([data-memory-timeline-event='true'], [data-memory-delete-operation='true']):last-child {
+  border-bottom: 0;
+}
+
+:root[data-dashboard-style='millennium']
+  :is([data-memory-timeline-event='true'], [data-memory-delete-operation='true']):hover {
+  background-color: color-mix(in srgb, var(--mil-on) 10%, transparent);
+  box-shadow: inset 3px 0 0 var(--mil-on-side);
+}
+
+:root[data-dashboard-style='millennium']
+  :is([data-memory-timeline-event='true'], [data-memory-delete-operation='true']):focus-visible {
+  outline: 2px solid var(--mil-on-side);
+  outline-offset: -3px;
+}
+
+/* 导入队列共用一块下沉屏幕，分组用实线、任务之间用虚线分隔。
+   内侧暗边单独覆盖在内容上方，避免标题、选中态或滚动内容盖住屏幕的凹槽。 */
+:root[data-dashboard-style='millennium'] [data-memory-import-queue-screen='true'] {
+  background-color: var(--mil-screen);
+  background-image: var(--mil-screen-tex);
+  background-size: 3px 3px;
+  border: 2px solid var(--mil-line);
+  box-shadow: -2px -2px 0 2px var(--mil-lo), 2px 2px 0 2px var(--mil-hi);
+  color: var(--mil-screen-ink);
+  isolation: isolate;
+  margin: 5px 9px 9px;
+  padding: 0;
+  position: relative;
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-queue-screen='true']::after {
+  box-shadow: inset 3px 3px 0 var(--mil-screen-shade);
+  content: '';
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-group='true'] {
+  border-bottom: 2px solid var(--mil-rule);
+  margin: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-group='true']:last-child {
+  border-bottom: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-group='true'] > * {
+  margin-block: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-group-header='true'] {
+  background-color: transparent;
+  border-bottom: 2px solid var(--mil-rule);
+  padding: 0.625rem 0.875rem;
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-task-list='true'] {
+  padding: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-task='true'] {
+  --mil-import-led: var(--mil-vent);
+  background-color: transparent;
+  background-image: none;
+  border: 0;
+  border-bottom: 2px dashed var(--mil-rule);
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--mil-screen-ink);
+  cursor: pointer;
+  margin: 0;
+  padding-left: 2.5rem;
+  position: relative;
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-task='true']:last-child {
+  border-bottom: 0;
+}
+
+/* 左侧实心状态灯不加外框和圆角；颜色表示任务状态，进度仍由百分比显示。 */
+:root[data-dashboard-style='millennium'] [data-memory-import-task='true']::before {
+  background-color: var(--mil-import-led);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  content: '';
+  height: 0.625rem;
+  left: 1rem;
+  position: absolute;
+  top: 1.25rem;
+  width: 0.625rem;
+}
+
+:root[data-dashboard-style='millennium']
+  [data-memory-import-task='true']:is([data-status='preparing'], [data-status='running']) {
+  --mil-import-led: var(--mil-led);
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-task='true'][data-status='completed'] {
+  --mil-import-led: var(--mil-on-side);
+}
+
+:root[data-dashboard-style='millennium']
+  [data-memory-import-task='true']:is([data-status='completed_with_errors'], [data-status='cancel_requested']) {
+  --mil-import-led: var(--mil-hot);
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-task='true'][data-status='failed'] {
+  --mil-import-led: var(--mil-danger);
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-task='true'][data-status='cancelled'] {
+  --mil-import-led: var(--mil-screen-dim);
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-task='true']:focus-visible {
+  outline: 2px solid var(--mil-on-side);
+  outline-offset: -4px;
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-task='true'] [data-dashboard-badge='true'] {
+  background-color: transparent;
+  border: 0;
+  box-shadow: none;
+  color: var(--mil-screen-dim);
+  padding: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-import-task='true'] [data-dashboard-progress='true'] {
+  display: none;
+}
+
 :root[data-dashboard-style='millennium']
   [data-dashboard-card-content='true']:has(> [data-memory-record-row]) {
   background-color: var(--mil-screen);
@@ -1405,6 +1757,17 @@
   box-shadow: inset 3px 3px 0 var(--mil-screen-shade);
   color: var(--mil-screen-ink);
   padding: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-memory-record-checkbox='true'] {
+  height: 1rem;
+  width: 1rem;
+}
+
+:root[data-dashboard-style='millennium']
+  [data-memory-record-checkbox='true'] [data-dashboard-checkbox-indicator='true'] svg {
+  height: 0.625rem;
+  width: 0.625rem;
 }
 
 :root[data-dashboard-style='millennium']
@@ -1460,6 +1823,15 @@
   color: var(--mil-screen-ink);
   margin: 4px;
   padding: 0.75rem 0.875rem;
+}
+
+/* 翻转卡面是绝对定位，无法撑开手机端的自动行高；为标题、状态屏和指示灯留足高度。 */
+@media (max-width: 1023.98px) {
+  :root[data-dashboard-style='millennium']
+    [data-home-page='true']
+    :is([data-maibot-status-flip-card='true'], [data-maibot-status-rotor='true']) {
+    min-height: 192px;
+  }
 }
 
 :root[data-dashboard-style='millennium'] [data-home-page='true'] [data-maibot-activity-orbit='true'] {
@@ -1521,13 +1893,13 @@
   background-color: var(--mil-panel);
   background-image: var(--mil-speck);
   background-size: 5px 5px;
-  border-right: 2px solid var(--mil-line);
-  box-shadow: inset 2px 0 0 var(--mil-hi), inset -2px 0 0 var(--mil-lo);
+  border-right: 0;
+  box-shadow: none;
 }
 
 :root[data-dashboard-style='millennium'] [data-chat-workspace-sidebar='true'] > div:first-child {
   border-bottom: 0;
-  padding: 0.75rem 0.75rem 0.25rem;
+  padding: 0.75rem 0.5rem 0.25rem;
 }
 
 :root[data-dashboard-style='millennium'] [data-chat-sidebar-list='true'] {
@@ -1700,7 +2072,7 @@
   color: var(--mil-on-ink);
 }
 
-/* 日志视图切换占据实际布局宽度，不再通过固定偏移挤占工作区键和搜索框。 */
+/* 日志视图切换在搜索框右侧占据实际布局宽度。 */
 :root[data-dashboard-style='millennium'] [data-dashboard-header='true'] #log-viewer-topbar-tabs {
   position: static;
   /* Tailwind 4 的位移使用独立 translate 属性，需与 transform 一并清除。 */
@@ -2002,8 +2374,8 @@
 
 :root[data-dashboard-style='millennium'] [data-chat-sidebar-list='true'] section {
   border-color: transparent;
-  margin-left: 0.75rem;
-  margin-right: 0.75rem;
+  margin-left: 0.5rem;
+  margin-right: 0.5rem;
 }
 
 /* 分组标题是印在壳上的丝印小字 */
@@ -2111,15 +2483,16 @@
 }
 
 /* 防滑纹是浮在标题条右上角的，给标题让出它的宽度，长标题才不会叠上去。
-   监控推理卡片使用无装饰的紧凑布局，不绘制防滑纹，避免与右侧来源标签重叠。 */
+   监控推理卡片使用无装饰的紧凑布局，不绘制防滑纹，避免与右侧来源标签重叠。
+   插件市场有最近活动标签时由标签替代防滑纹，也不再为纹样预留空间。 */
 :root[data-dashboard-style='millennium']
-  [data-dashboard-card='true']:not([data-maisaka-trace-card='true'])
+  [data-dashboard-card='true']:not([data-maisaka-trace-card='true']):not([data-plugin-recent-activity='true'])
   > [data-dashboard-card-header='true']:not(:has(button, input, [role='tablist'], [role='combobox'])) {
   padding-right: calc(0.875rem + 34px + 0.75rem);
 }
 
 :root[data-dashboard-style='millennium']
-  [data-dashboard-card='true']:not([data-maisaka-trace-card='true'])
+  [data-dashboard-card='true']:not([data-maisaka-trace-card='true']):not([data-plugin-recent-activity='true'])
   > [data-dashboard-card-header='true']:not(:has(button, input, [role='tablist'], [role='combobox']))::after {
   background: repeating-linear-gradient(90deg, var(--mil-vent) 0 2px, transparent 2px 6px);
   content: '';
@@ -2130,34 +2503,36 @@
   width: 34px;
 }
 
-/* ---------- 麦麦聊天：右侧对话区是一个模块，工具栏是一排小键帽 ---------- */
+/* ---------- 麦麦聊天：右侧对话区与侧栏平铺相接，工具栏是一排小键帽 ---------- */
 
 :root[data-dashboard-style='millennium'] [data-chat-observed-session] {
   display: flex;
   flex-direction: column;
-  padding: 1rem 1.25rem 1.5rem 1rem;
+  padding: 0;
 }
 
 :root[data-dashboard-style='millennium'] [data-chat-observed-session] > div {
   background-color: var(--mil-panel);
   background-image: var(--mil-speck);
   background-size: 5px 5px;
-  border: 2px solid var(--mil-line);
-  box-shadow:
-    inset 2px 2px 0 var(--mil-hi),
-    inset -2px -2px 0 var(--mil-lo),
-    0 5px 0 var(--mil-drop);
+  border: 0;
+  box-shadow: none;
   flex: 1 1 auto;
   height: auto;
   min-height: 0;
-  padding: 0.75rem 0.875rem 0.875rem;
+  padding: 0;
 }
 
 :root[data-dashboard-style='millennium'] [data-maisaka-toolbar='true'] {
   background: none;
   gap: 0.5rem;
-  margin-bottom: 0.625rem;
-  padding: 0 0 4px;
+  margin-bottom: 0.25rem;
+  padding: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-chat-observed-session] [data-maisaka-toolbar='true'] {
+  margin-bottom: 0;
+  padding: 0.75rem 0.75rem 0.5rem;
 }
 
 :root[data-dashboard-style='millennium']
@@ -2170,12 +2545,12 @@
   color: var(--mil-ink);
   font-size: 0.75rem;
   font-weight: 700;
-  height: 2rem;
-  padding: 0 0.625rem 3px;
+  height: 1.75rem;
+  padding: 0 0.5rem 3px;
 }
 
 :root[data-dashboard-style='millennium'] [data-maisaka-toolbar='true'] [data-dashboard-button='true'].w-6 {
-  width: 2rem;
+  width: 1.75rem;
 }
 
 :root[data-dashboard-style='millennium'] [data-maisaka-toolbar='true'] div.group span {
@@ -2183,24 +2558,64 @@
   font-weight: 700;
 }
 
-:root[data-dashboard-style='millennium'] [data-maisaka-toolbar='true'] [data-dashboard-badge='true'] {
+:root[data-dashboard-style='millennium']
+  :is([data-maisaka-toolbar='true'], [data-maisaka-floating-status='true'])
+  [data-dashboard-badge='true'] {
   font-size: 0.75rem;
   padding: 3px 8px;
 }
 
-:root[data-dashboard-style='millennium'] [data-maisaka-toolbar='true'] :is(p, span.text-muted-foreground) {
+:root[data-dashboard-style='millennium']
+  :is([data-maisaka-toolbar='true'], [data-maisaka-floating-status='true'])
+  :is(p, span.text-muted-foreground) {
   color: var(--mil-print);
   font-size: 0.75rem;
   font-weight: 700;
 }
 
-/* 对话记录屏幕：按设计稿的下沉边框 */
+:root[data-dashboard-style='millennium'] [data-maisaka-floating-status='true'] {
+  background-color: var(--mil-panel);
+  background-image: var(--mil-speck);
+  background-size: 5px 5px;
+  border: 2px solid var(--mil-line);
+  box-shadow: var(--mil-bevel);
+}
+
+/* 推理跳转沿用工具栏的小键帽，覆盖标题行对普通按钮的无框样式。 */
+:root:root[data-dashboard-style='millennium']
+  [data-maisaka-reasoning-button='true'][data-dashboard-button='true'] {
+  background-color: var(--mil-key);
+  color: var(--mil-ink);
+  box-shadow:
+    inset 0 0 0 2px var(--mil-line),
+    inset 0 -5px 0 var(--mil-key-side) !important;
+  height: 1.75rem !important;
+  min-height: 1.75rem !important;
+  width: 1.75rem;
+  padding: 0 0 3px !important;
+}
+
+/* 对话记录屏幕使用与侧栏列表相同的下凹边框，留出窄边以完整显示四周阴影。 */
 :root[data-dashboard-style='millennium']
   [data-chat-observed-session]
-  [data-dashboard-card='true']:not([data-dashboard-card='true'] [data-dashboard-card='true']) {
+  [data-maisaka-timeline='true'] {
   border: 2px solid var(--mil-line);
   box-shadow: var(--mil-sunk);
-  margin: 4px;
+  margin: 4px 6px 4px 4px;
+}
+
+:root[data-dashboard-style='millennium']
+  [data-maisaka-timeline='true']
+  [data-dashboard-scrollbar='true'][data-orientation='vertical'] {
+  width: 8px;
+}
+
+/* Planner 卡片和它下面的工具调用属于同一轮，中间不画标题区的底边线 */
+:root[data-dashboard-style='millennium']
+  [data-maisaka-planner-card='true']
+  > [data-dashboard-card-header='true'] {
+  border-bottom: 0;
+  box-shadow: none;
 }
 
 /* ---------- 表格行内的操作键 ---------- */
@@ -2283,7 +2698,7 @@
 
 :root[data-dashboard-style='millennium'] [data-dashboard-button='true'][data-plugin-delete-button] {
   background-color: var(--mil-danger);
-  border-color: transparent;
+  border-color: var(--mil-line);
   box-shadow:
     inset 0 0 0 2px var(--mil-line),
     inset 0 -7px 0 var(--mil-danger-side),
@@ -2412,7 +2827,7 @@
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   background-color: var(--mil-key);
-  border-color: transparent;
+  border-color: var(--mil-line);
   box-shadow:
     var(--mil-keycap),
     0 4px 0 var(--mil-drop);
@@ -2439,12 +2854,23 @@
   color: var(--mil-ink);
 }
 
-/* 顶栏图标键：通用规则把它们固定成 2rem，这里按设计稿放大到和工作区键一样高 */
+/* 顶栏功能键缩为 36px，收薄键帽底边，让右侧工具区更紧凑。 */
 :root[data-dashboard-style='millennium']
   [data-dashboard-header='true']
   [data-dashboard-header-action='true'] {
-  height: 2.875rem !important;
-  width: 2.875rem !important;
+  height: 2.25rem !important;
+  width: 2.25rem !important;
+  padding-bottom: 3px;
+  box-shadow:
+    inset 0 0 0 2px var(--mil-line), inset 0 -5px 0 var(--mil-key-side),
+    inset 3px 3px 0 var(--mil-key-hi);
+}
+
+:root[data-dashboard-style='millennium']
+  [data-dashboard-header='true']
+  [data-dashboard-header-action='true'][data-header-action-highlighted='true'] {
+  box-shadow: var(--mil-pressed);
+  padding-bottom: 2px;
 }
 
 /* ---------- 首页模块的标题条：通栏、带刻线，和设计稿一致 ---------- */
@@ -2904,12 +3330,34 @@
 
 /* ---------- 千禧图标 ---------- */
 
+/* 手机记忆页的多行标签保留键帽样式，但文字与留白必须能放进窄列。 */
+@media (max-width: 1023px) {
+  :root[data-dashboard-style='millennium']
+    [data-memory-console-page='true'] [data-dashboard-tabs-trigger='true'] {
+    min-width: 0;
+    padding-inline: 0.375rem;
+    font-size: 0.75rem;
+  }
+}
+
 /* 手绘图标的路径和替换规则统一登记在 src/components/ui/millennium-icon-set.ts，
    替换图标库图标用的样式由它在启动时生成，这里不再手写。 */
 
-/* 下沉屏幕阴影上下各外扩 4px，扣除后让视觉高度与工作区键对齐。 */
+/* 搜索框收窄到 240px；阴影上下外扩 4px，视觉高度与右侧 36px 功能键对齐。 */
+:root[data-dashboard-style='millennium'] [data-dashboard-header-search='true'] {
+  max-width: 15rem;
+}
+
 :root[data-dashboard-style='millennium'] [data-dashboard-header-search='true'] input {
-  height: calc(2.875rem - 8px);
+  height: calc(2.25rem - 8px);
+  padding-left: 0.625rem;
+  padding-right: 2rem;
+  font-size: 0.75rem;
+}
+
+:root[data-dashboard-style='millennium'] [data-dashboard-header-search='true'] button {
+  height: 1.5rem;
+  width: 1.5rem;
 }
 
 /* 搜索结果沿用聊天记录的下沉屏幕材质，外框保留机壳颗粒底纹。 */
@@ -2937,4 +3385,799 @@
 
 :root[data-dashboard-style='millennium'] [data-search-answer='true'] > .text-muted-foreground {
   color: var(--mil-screen-ink);
+}
+
+/* ---------- 日志 → 推理过程：两栏平铺，记录列表和记录内容各是一块屏幕 ---------- */
+
+/* 两栏不再套凸起外壳，内容区直接使用页面空间 */
+:root[data-dashboard-style='millennium'] [data-reasoning-process='true'] {
+  padding-bottom: 0;
+}
+
+/* 这一页原来到处是 1px 细线框：统一加粗到 2px。带语义色的边框（角色、状态）保留颜色，
+   其余换成刻线色。用 :where 压低优先级，让下面的模块、屏幕、标签规则都能覆盖。 */
+:root[data-dashboard-style='millennium']
+  [data-reasoning-process='true']
+  :where(:is(article, section, aside, div, pre, details, figure).border) {
+  border-width: 2px;
+}
+
+:root[data-dashboard-style='millennium']
+  [data-reasoning-process='true']
+  :where(
+    :is(article, section, aside, div, pre, details, figure).border:not(
+        [data-dashboard-badge='true'],
+        [class*='border-orange'],
+        [class*='border-cyan'],
+        [class*='border-emerald'],
+        [class*='border-amber'],
+        [class*='border-violet'],
+        [class*='border-indigo'],
+        [class*='border-fuchsia'],
+        [class*='border-sky'],
+        [class*='border-teal'],
+        [class*='border-destructive'],
+        [class*='border-primary'],
+        [class*='border-muted-foreground']
+      )
+  ) {
+  border-color: var(--mil-lo);
+}
+
+:root[data-dashboard-style='millennium']
+  [data-reasoning-process='true']
+  [data-dashboard-badge='true'].text-foreground {
+  border-color: var(--mil-line);
+}
+
+/* 列表和内容两栏、重放面板：平铺在页面上，边框只留给内容屏幕 */
+:root[data-dashboard-style='millennium'] [data-reasoning-panel='true'] {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: var(--mil-ink);
+}
+
+/* 标题条和正文共用整栏背景，只用一道刻线分隔 */
+:root[data-dashboard-style='millennium'] [data-reasoning-panel-header='true'] {
+  border-bottom: 2px solid var(--mil-lo);
+  box-shadow: none;
+}
+
+/* 记录数和页码是印在壳上的丝印小字 */
+:root[data-dashboard-style='millennium'] [data-reasoning-panel-count='true'] {
+  color: var(--mil-print);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+/* 筛选栏和翻页键与记录列表左右对齐，和屏幕之间不再画线 */
+:root[data-dashboard-style='millennium'] [data-reasoning-panel-toolbar='true'] {
+  border-bottom: 0;
+  padding: 0.5rem 0 0.125rem;
+}
+
+/* 筛选栏里的键帽和输入框统一收到小一档的高度，给下面的记录列表多留位置 */
+:root[data-dashboard-style='millennium']
+  [data-reasoning-panel-toolbar='true']
+  [data-dashboard-button='true']:is(.h-8, .h-9) {
+  font-size: 0.8125rem;
+  height: 2.25rem;
+  padding-left: 0.625rem;
+  padding-right: 0.625rem;
+}
+
+:root[data-dashboard-style='millennium']
+  [data-reasoning-panel-toolbar='true']
+  [data-dashboard-button='true'].w-8 {
+  padding-left: 0;
+  padding-right: 0;
+  width: 2.25rem;
+}
+
+:root[data-dashboard-style='millennium']
+  [data-reasoning-panel-toolbar='true']
+  :is([data-dashboard-input='true'], [data-dashboard-select-trigger='true']).h-9 {
+  font-size: 0.8125rem;
+  height: 2.25rem;
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-panel-footer='true'] {
+  border-top: 0;
+  height: auto;
+  padding: 0.125rem 0 0.5rem;
+}
+
+/* 内容背景铺满记录列表和详情滚动区，短内容下方也不露出不同底色 */
+:root[data-dashboard-style='millennium'] [data-reasoning-screen='true'] {
+  background-color: var(--mil-screen);
+  background-image: var(--mil-screen-tex);
+  background-size: 3px 3px;
+  border: 2px solid var(--mil-line);
+  /* 屏幕紧贴两栏边缘，只保留这一层边框，不再叠加下沉阴影 */
+  box-shadow: none;
+  color: var(--mil-screen-ink);
+  margin: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-screen='true'][data-reasoning-list='true'] {
+  margin: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-screen='true'] .text-foreground {
+  color: var(--mil-screen-ink);
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-screen='true'] .text-muted-foreground {
+  color: var(--mil-screen-dim);
+}
+
+/* 屏幕里的分区框用浅刻线，折叠区的分隔线是虚线 */
+:root[data-dashboard-style='millennium']
+  [data-reasoning-screen='true']
+  :where(
+    :is(article, section, div, pre, details, figure).border:not(
+        [data-dashboard-badge='true'],
+        [class*='border-orange'],
+        [class*='border-cyan'],
+        [class*='border-emerald'],
+        [class*='border-amber'],
+        [class*='border-violet'],
+        [class*='border-indigo'],
+        [class*='border-fuchsia'],
+        [class*='border-sky'],
+        [class*='border-teal'],
+        [class*='border-destructive'],
+        [class*='border-primary'],
+        [class*='border-muted-foreground']
+      )
+  ) {
+  border-color: var(--mil-rule);
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-screen='true'] .border-t {
+  border-top: 2px dashed var(--mil-rule);
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-screen='true'] .border-b {
+  border-bottom: 2px dashed var(--mil-rule);
+}
+
+/* 记录列表：一行一条，行间虚线，选中的是整行薄荷绿 */
+:root[data-dashboard-style='millennium'] [data-reasoning-list-items='true'] {
+  padding: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-list-item='true'] {
+  border: 0;
+  border-bottom: 2px dashed var(--mil-rule);
+  color: var(--mil-screen-ink);
+  margin-top: 0;
+  padding: 0.625rem 0.75rem;
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-list-item='true']:hover {
+  background-color: color-mix(in srgb, var(--mil-on) 22%, transparent);
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-list-item='true'][data-active='true'] {
+  background-color: var(--mil-on);
+  color: var(--mil-on-ink);
+}
+
+:root[data-dashboard-style='millennium']
+  [data-reasoning-list-item='true'][data-active='true']
+  :is(.text-foreground, .text-muted-foreground) {
+  color: var(--mil-on-ink);
+}
+
+/* 「完整 Item JSON」收起时只是屏幕上一个浅刻线的小入口，不抢正文；展开后才浮成一块屏幕 */
+:root[data-dashboard-style='millennium'] [data-reasoning-item-json='true'] {
+  background-color: transparent !important;
+  border: 2px solid var(--mil-rule);
+  box-shadow: none;
+  color: var(--mil-screen-dim);
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-item-json='true']:hover {
+  color: var(--mil-screen-ink);
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-item-json='true'][data-state='open'] {
+  background-color: var(--mil-screen) !important;
+  border-color: var(--mil-line);
+  box-shadow: 6px 6px 0 var(--mil-float-shadow);
+  color: var(--mil-screen-ink);
+}
+
+/* 类型总览：每个类型是一块凸起的小模块 */
+:root[data-dashboard-style='millennium'] [data-reasoning-stage-card='true'] {
+  background-color: var(--mil-panel);
+  border: 2px solid var(--mil-line);
+  box-shadow: var(--mil-raise);
+}
+
+:root[data-dashboard-style='millennium']
+  [data-reasoning-stage-card='true']:is(:hover, :focus-within) {
+  background-color: var(--mil-key-hover);
+  box-shadow: var(--mil-raise);
+}
+
+/* 屏幕里的层级只留两层：屏幕本身和带颜色的 Item 卡片。
+   「请求 Items」这类分区不再画框，改用标题和区间虚线分隔；消息前的引用竖线也去掉。 */
+:root[data-dashboard-style='millennium']
+  [data-reasoning-screen='true']
+  > div
+  > :is(section, div).border:not([class*='bg-']) {
+  border: 0;
+  padding: 0;
+}
+
+:root[data-dashboard-style='millennium']
+  [data-reasoning-screen='true']
+  > div
+  > :is(section, div).border:not([class*='bg-']):not(:last-child) {
+  border-bottom: 2px dashed var(--mil-rule);
+  padding-bottom: 0.75rem;
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-message-block='true'] {
+  border-left: 0;
+  padding-left: 0;
+}
+
+/* 最终输出：用底部实线和请求过程分开，不再套额外的分区框 */
+:root[data-dashboard-style='millennium'] [data-reasoning-output='true'] {
+  border-bottom: 2px solid var(--mil-line);
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.875rem;
+}
+
+:root[data-dashboard-style='millennium'] [data-reasoning-output='true'] > section {
+  border: 0;
+  box-shadow: none;
+}
+
+/* ---------- 移动端底部标签栏：机壳下沿上一排键帽，选中的是按下去的绿键 ---------- */
+
+:root[data-dashboard-style='millennium'] [data-mobile-tabbar='true'] {
+  background-color: var(--mil-panel);
+  background-image: var(--mil-speck);
+  background-size: 5px 5px;
+  border-top: 2px solid var(--mil-line);
+  bottom: 0;
+  box-shadow: inset 0 2px 0 var(--mil-hi);
+  height: auto;
+  left: 0;
+  padding: 10px 10px calc(env(safe-area-inset-bottom) + 12px);
+  right: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-tabbar-tabs='true'] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background: none;
+  box-shadow: none;
+  gap: 6px;
+  height: 58px;
+  padding: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-tab='true'] {
+  background-color: var(--mil-key);
+  box-shadow: var(--mil-keycap);
+  color: var(--mil-ink);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  height: 58px;
+  padding-bottom: 7px;
+  /* 切换标签时键帽按下 / 弹起有过渡 */
+  transition:
+    background-color 0.12s steps(2),
+    box-shadow 0.12s steps(2),
+    padding 0.12s steps(2),
+    transform 0.12s steps(2);
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-tab='true'][data-active='true'] {
+  background-color: var(--mil-on);
+  box-shadow: var(--mil-pressed);
+  color: var(--mil-on-ink);
+  padding-bottom: 2px;
+  transform: none;
+}
+
+/* 管理页的入口键帽：沿用侧栏键位的材质，文字靠左排 */
+:root[data-dashboard-style='millennium'] [data-manage-page='true'] [data-dashboard-nav-item='true'] {
+  color: var(--mil-ink);
+  text-decoration: none;
+}
+
+/* 手机上的底部弹层：拖动条画成一段散热栅格 */
+:root[data-dashboard-style='millennium'] [data-dialog-grabber='true'] {
+  background: repeating-linear-gradient(90deg, var(--mil-vent) 0 2px, transparent 2px 6px);
+  height: 8px;
+  width: 56px;
+}
+
+/* ---------- 手机端页面大标题：像素字丝印 ---------- */
+
+:root[data-dashboard-style='millennium'] [data-mobile-large-title='true'] {
+  color: var(--mil-ink);
+  font-family: var(--mil-font-pixel);
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+/* ---------- 手机端聊天：会话各在一块下沉屏幕里，对话页顶栏是一排键帽 ---------- */
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-list='true'] {
+  background-color: var(--mil-panel);
+  background-image: var(--mil-speck);
+  background-size: 5px 5px;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-search='true'],
+:root[data-dashboard-style='millennium'] [data-mobile-chat-screen='true'] {
+  background-color: var(--mil-screen);
+  background-image: var(--mil-screen-tex);
+  background-size: 3px 3px;
+  border: 2px solid var(--mil-line);
+  box-shadow: var(--mil-sunk);
+  color: var(--mil-screen-ink);
+  margin: 4px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-search='true'] {
+  margin: 0 4px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-swipe-row='true'] > div:last-child {
+  background-color: var(--mil-screen);
+}
+
+:root[data-dashboard-style='millennium']
+  [data-mobile-chat-swipe-row='true']
+  + [data-mobile-chat-swipe-row='true'],
+:root[data-dashboard-style='millennium']
+  [data-mobile-chat-section='local']:has(> [data-mobile-chat-swipe-row='true'])
+  + [data-mobile-chat-section='observed']:has(> [data-mobile-chat-swipe-row='true']) {
+  border-top: 2px dashed var(--mil-rule);
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-row='true'] {
+  height: 62px;
+  padding: 0 10px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-row='true'] > span:last-child {
+  box-shadow: none;
+}
+
+:root[data-dashboard-style='millennium']
+  [data-mobile-chat-row='true']
+  [data-mobile-chat-avatar='true'] {
+  border: 2px solid var(--mil-line);
+  border-radius: 0;
+  height: 40px;
+  width: 40px;
+}
+
+:root[data-dashboard-style='millennium']
+  [data-mobile-chat-row='true']
+  [data-mobile-chat-avatar='true']
+  * {
+  border-radius: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-badge='true'] {
+  background: var(--mil-key);
+  border: 2px solid var(--mil-line);
+  border-radius: 0;
+  color: var(--mil-ink);
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-row-action] {
+  background-color: var(--mil-key);
+  box-shadow: var(--mil-keycap);
+  color: var(--mil-ink);
+  font-weight: 700;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-row-action='destructive'] {
+  background-color: var(--mil-danger);
+  box-shadow:
+    inset 0 0 0 2px var(--mil-line),
+    inset 0 -7px 0 var(--mil-danger-side);
+  color: #fff;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-room-bar='true'] {
+  background-color: var(--mil-panel);
+  background-image: var(--mil-speck);
+  background-size: 5px 5px;
+  border-bottom: 2px solid var(--mil-line);
+  box-shadow:
+    inset 0 2px 0 var(--mil-hi),
+    inset 0 -2px 0 var(--mil-lo),
+    0 5px 0 var(--mil-drop);
+  padding-bottom: 10px;
+  position: relative;
+  z-index: 2;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-room-button='true'] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--mil-key);
+  border-radius: 0;
+  box-shadow: var(--mil-keycap);
+  color: var(--mil-ink);
+  height: 46px;
+  padding-bottom: 5px;
+  width: 46px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-room-button='true'] * {
+  border-radius: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-room-title='true'] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background: none;
+  box-shadow: none;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-room-title='true'] b {
+  font-family: var(--mil-font-pixel);
+  font-size: 22px;
+  font-weight: 400;
+}
+
+/* 千禧对话页顶栏只留像素字会话名与指示灯，不放头像 */
+:root[data-dashboard-style='millennium'] [data-mobile-chat-room-title='true'] > span:first-child {
+  display: none;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-chat-room-led='true'] {
+  border: 2px solid var(--mil-line);
+  border-radius: 0;
+  height: 8px;
+  width: 8px;
+}
+
+/* 手机页头的返回键与分段切换：键帽，选中的是按下去的绿键 */
+:root[data-dashboard-style='millennium'] [data-mobile-page-back='true'] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--mil-key);
+  border-radius: 0;
+  box-shadow: var(--mil-keycap);
+  color: var(--mil-ink);
+  height: 46px;
+  padding-bottom: 5px;
+  width: 46px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-segmented='true'] {
+  background: none;
+  border-radius: 0;
+  gap: 8px;
+  padding: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-segmented='true'] > * {
+  background-color: var(--mil-key);
+  border-radius: 0;
+  box-shadow: var(--mil-keycap);
+  color: var(--mil-ink);
+  font-weight: 700;
+  height: 46px;
+  padding-bottom: 5px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-segmented='true'] > [data-active='true'] {
+  background-color: var(--mil-on);
+  box-shadow: var(--mil-pressed);
+  color: var(--mil-on-ink);
+  padding-bottom: 2px;
+  transform: translateY(2px);
+}
+
+/* 手机端设置分区胶囊：一排键帽 */
+:root[data-dashboard-style='millennium'] [data-mobile-pill-nav='true'] button {
+  background-color: var(--mil-key);
+  border-radius: 0;
+  box-shadow: var(--mil-keycap);
+  color: var(--mil-ink);
+  font-weight: 700;
+  height: 46px;
+  padding-bottom: 5px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-pill-nav='true'] button[data-active='true'] {
+  background-color: var(--mil-on);
+  box-shadow: var(--mil-pressed);
+  color: var(--mil-on-ink);
+  padding-bottom: 2px;
+  transform: translateY(2px);
+}
+
+/* 长文本字段的列表行与编辑弹层 */
+:root[data-dashboard-style='millennium'] [data-mobile-text-sheet-card='true'] {
+  background-color: var(--mil-screen);
+  background-image: var(--mil-screen-tex);
+  background-size: 3px 3px;
+  border: 2px solid var(--mil-line);
+  border-radius: 0;
+  box-shadow: var(--mil-sunk);
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-sheet-button] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--mil-key);
+  border-radius: 0;
+  box-shadow: var(--mil-keycap);
+  color: var(--mil-ink);
+  height: 46px;
+  padding-bottom: 5px;
+  width: 46px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-sheet-button='confirm'] {
+  background-color: var(--mil-hot);
+  box-shadow: inset 0 0 0 2px var(--mil-line), inset 0 -7px 0 var(--mil-hot-side);
+  color: var(--mil-hot-ink);
+}
+
+/* 手机页头右上角的「+」：珊瑚橙主操作键，展开时不旋转 */
+:root[data-dashboard-style='millennium'] [data-mobile-header-button='true'] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--mil-hot);
+  border-radius: 0;
+  box-shadow: inset 0 0 0 2px var(--mil-line), inset 0 -7px 0 var(--mil-hot-side), inset 4px 4px 0 rgb(255 255 255 / 0.28);
+  color: var(--mil-hot-ink);
+  height: 46px;
+  padding-bottom: 5px;
+  transform: none;
+  width: 46px;
+}
+
+/* 手机页头右上角的文字键与图标键 */
+:root[data-dashboard-style='millennium'] [data-mobile-header-text-button],
+:root[data-dashboard-style='millennium'] [data-mobile-header-icon-button='true'] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--mil-key);
+  border-radius: 0;
+  box-shadow: var(--mil-keycap);
+  color: var(--mil-ink);
+  font-weight: 700;
+  height: 46px;
+  padding-bottom: 5px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-header-icon-button='true'] {
+  width: 46px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-header-text-button='primary'] {
+  background-color: var(--mil-on);
+  box-shadow: var(--mil-pressed);
+  color: var(--mil-on-ink);
+  padding-bottom: 2px;
+  transform: translateY(2px);
+}
+
+/* 手机表情包网格：卡片之间留缝，每张是一块下沉屏幕 */
+:root[data-dashboard-style='millennium'] [data-mobile-emoji-grid='true'] {
+  gap: 10px;
+  margin: 0;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-emoji-tile='true'] {
+  border: 2px solid var(--mil-line);
+  box-shadow: var(--mil-sunk);
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-emoji-tile='true'] > span:last-child {
+  border: 2px solid var(--mil-line);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-emoji-tile='true'][data-selected='true'] > span:last-child {
+  background-color: var(--mil-on);
+  color: var(--mil-on-ink);
+}
+
+/* 手机多选批量操作栏：浮起的面板上一排键帽，删除是红键 */
+:root[data-dashboard-style='millennium'] [data-mobile-batch-toolbar='true'] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--mil-panel);
+  background-image: var(--mil-speck);
+  background-size: 5px 5px;
+  border: 2px solid var(--mil-line);
+  border-radius: 0;
+  box-shadow: var(--mil-float);
+  gap: 8px;
+  height: auto;
+  padding: 10px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-batch-action] {
+  background-color: var(--mil-key);
+  border-radius: 0;
+  box-shadow: var(--mil-keycap);
+  color: var(--mil-ink);
+  font-weight: 700;
+  height: 46px;
+  padding-bottom: 5px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-batch-action='register'] {
+  background-color: var(--mil-hot);
+  box-shadow: inset 0 0 0 2px var(--mil-line), inset 0 -7px 0 var(--mil-hot-side);
+  color: var(--mil-hot-ink);
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-batch-action='delete'] {
+  background-color: var(--mil-danger);
+  box-shadow: inset 0 0 0 2px var(--mil-line), inset 0 -7px 0 var(--mil-danger-side);
+  color: #fff;
+}
+
+/* 手机表达方式卡片审核：通过是绿键，拒绝是红键 */
+:root[data-dashboard-style='millennium'] [data-quick-review-action] {
+  border: 0;
+  border-radius: 0;
+  height: 52px;
+  padding-bottom: 5px;
+  width: 96px;
+}
+
+:root[data-dashboard-style='millennium'] [data-quick-review-action='reject'] {
+  background-color: var(--mil-danger);
+  box-shadow: inset 0 0 0 2px var(--mil-line), inset 0 -7px 0 var(--mil-danger-side);
+  color: #fff;
+}
+
+:root[data-dashboard-style='millennium'] [data-dashboard-shell='true'] [data-quick-review-action='approve'] {
+  background-color: var(--mil-on) !important;
+  box-shadow: inset 0 0 0 2px var(--mil-line), inset 0 -7px 0 var(--mil-on-side) !important;
+  color: var(--mil-on-ink) !important;
+}
+
+/* ---------- 手机标签栏的其余部件：与原版结构相同，只换成机壳材质 ---------- */
+
+/* 麦麦实时条：一块下沉的小屏幕 */
+:root[data-dashboard-style='millennium'] [data-mobile-live-strip='true'] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--mil-screen);
+  background-image: var(--mil-screen-tex);
+  background-size: 3px 3px;
+  border: 2px solid var(--mil-line);
+  border-radius: 0;
+  box-shadow: var(--mil-sunk);
+  color: var(--mil-screen-ink);
+  height: 50px;
+}
+
+:root[data-dashboard-style='millennium'] [data-mobile-live-strip='true'] > span:first-child {
+  background-color: var(--mil-led);
+  border: 2px solid var(--mil-line);
+  border-radius: 0;
+  color: var(--mil-line);
+  font-family: var(--mil-font-pixel);
+  height: 32px;
+  width: 32px;
+}
+
+/* 搜索键 */
+:root[data-dashboard-style='millennium'] [data-mobile-tabbar-search='true'] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--mil-key);
+  border-radius: 0;
+  box-shadow: var(--mil-keycap);
+  color: var(--mil-ink);
+  height: 58px;
+  padding-bottom: 7px;
+}
+
+/* 收起后统一三块控件的外框，实时屏的凹陷层次留在框内，不向外撑出。 */
+:root[data-dashboard-style='millennium']
+  [data-mobile-tabbar='true'][data-collapsed='true']
+  :is([data-mobile-tabbar-tabs='true'], [data-mobile-tabbar-search='true']) {
+  width: 58px;
+}
+
+:root[data-dashboard-style='millennium']
+  [data-mobile-tabbar='true'][data-collapsed='true']
+  [data-mobile-live-strip='true'] {
+  box-shadow: inset 3px 3px 0 var(--mil-screen-shade), inset -2px -2px 0 var(--mil-hi);
+  height: 58px;
+}
+
+/* 首页右上角的头像入口：一枚键帽 */
+:root[data-dashboard-style='millennium'] [data-home-avatar-entry='true'] {
+  background-color: var(--mil-key);
+  border-radius: 0;
+  box-shadow: var(--mil-keycap);
+  color: var(--mil-ink);
+  font-family: var(--mil-font-pixel);
+  height: 46px;
+  padding-bottom: 5px;
+  width: 46px;
+}
+
+/* 首次配置向导：方形状态灯与下沉导轨，沿用机壳的硬边材质。 */
+:root[data-dashboard-style='millennium'] [data-setup-steps='true'] {
+  --setup-indicator-size: 2rem;
+}
+
+:root[data-dashboard-style='millennium'] [data-setup-step='true'] {
+  gap: 0.5rem;
+}
+
+:root[data-dashboard-style='millennium'] [data-setup-connector='true'] {
+  top: calc(var(--setup-indicator-size) / 2 - 4px);
+  height: 8px;
+  border: 2px solid var(--mil-line);
+  background-color: var(--mil-lo);
+  box-shadow: inset 0 2px 0 var(--mil-screen-shade), 0 2px 0 var(--mil-hi);
+}
+
+:root[data-dashboard-style='millennium']
+  [data-setup-state='complete'] > [data-setup-connector='true'] {
+  background-color: var(--mil-on);
+}
+
+:root[data-dashboard-style='millennium'] [data-setup-indicator='true'] {
+  width: var(--setup-indicator-size);
+  height: var(--setup-indicator-size);
+  border: 2px solid var(--mil-line);
+  border-radius: 0;
+  background-color: var(--mil-panel);
+  box-shadow: var(--mil-bevel), 0 3px 0 var(--mil-drop);
+  color: var(--mil-print);
+}
+
+:root[data-dashboard-style='millennium']
+  [data-setup-state='complete'] > [data-setup-indicator='true'] {
+  background-color: var(--mil-on);
+  box-shadow: inset 2px 2px 0 rgb(255 255 255 / 0.3), inset -2px -2px 0 var(--mil-on-side),
+    0 3px 0 var(--mil-drop);
+  color: var(--mil-on-ink);
+}
+
+:root[data-dashboard-style='millennium']
+  [data-setup-state='current'] > [data-setup-indicator='true'] {
+  background-color: var(--mil-hot);
+  box-shadow: inset 2px 2px 0 rgb(255 255 255 / 0.3), inset -2px -2px 0 var(--mil-hot-side),
+    0 3px 0 var(--mil-drop);
+  color: var(--mil-hot-ink);
+}
+
+:root[data-dashboard-style='millennium'] [data-setup-label='true'] {
+  color: var(--mil-print);
+}
+
+:root[data-dashboard-style='millennium']
+  [data-setup-state='current'] > [data-setup-label='true'] {
+  color: var(--mil-ink);
+  font-weight: 700;
+}
+
+/* 千禧标签栏的选中态是按下去的键帽，不用滑动底板 */
+:root[data-dashboard-style='millennium'] [data-mobile-tab-indicator='true'] {
+  display: none;
 }

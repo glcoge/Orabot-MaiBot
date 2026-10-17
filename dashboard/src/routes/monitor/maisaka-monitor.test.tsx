@@ -157,7 +157,11 @@ function setupMonitorState(overrides: MonitorStateOverrides = {}) {
     selectedSession: overrides.selectedSession ?? null,
     setSelectedSession: hookActions.setSelectedSession,
     connected: overrides.connected ?? true,
+    subagentTasks: [],
     clearTimeline: hookActions.clearTimeline,
+    historyLoading: false,
+    hasMoreHistory: false,
+    loadOlderHistory: vi.fn(),
   }
   monitorHookMocks.useMaisakaMonitor.mockReturnValue(state)
   act(() => monitorHookMocks.listeners.forEach((listener) => listener()))
@@ -416,6 +420,45 @@ describe('MaisakaMonitor 空态与侧边栏', () => {
     expect(screen.getByText('等待 MaiSaka 会话…')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '折叠侧边栏' })).toBeInTheDocument()
     expect(window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY)).toBe('false')
+  })
+})
+
+describe('思考流程节点', () => {
+  it('按时间线显示流程节点、模型重试和最终失败', () => {
+    setupMonitorState({ timeline: [
+      makeEntry('flow.step', {
+        session_id: 's1', run_id: 'r1', cycle_id: 1, step: 'planner.requested',
+        title: '第 1/8 轮 · 请求模型', detail: '上下文已整理：历史 12 条，可用工具 4 个。', timestamp: nowSec(),
+      }),
+      makeEntry('llm.retry', {
+        session_id: 's1', task_name: 'planner', request_type: 'planner', model_name: '测试模型',
+        attempt: 2, max_attempts: 3, reason: '请求超时', retry_interval: 5, timestamp: nowSec(),
+      }),
+      makeEntry('llm.error', {
+        session_id: 's1', task_name: 'planner', request_type: 'planner', model_name: '测试模型',
+        message: '重试次数已用尽', timestamp: nowSec(),
+      }),
+    ] })
+    render(<MaisakaMonitor />)
+    expect(screen.getByText('第 1/8 轮 · 请求模型')).toBeInTheDocument()
+    expect(screen.getByTitle('上下文已整理：历史 12 条，可用工具 4 个。')).toBeInTheDocument()
+    expect(screen.getByText('模型请求重试 2/3')).toBeInTheDocument()
+    expect(screen.getByText(/请求超时.*5 秒后重试/s)).toBeInTheDocument()
+    expect(screen.getByText('模型请求失败')).toBeInTheDocument()
+    expect(screen.getByText(/重试次数已用尽/)).toBeInTheDocument()
+  })
+
+  it('轮次结束后显示真实结束原因，执行中不提前展示结果', () => {
+    const data = makeFinalized({ final_state: {
+      time_records: {}, agent_state: 'wait', end_reason: 'tool_pause:wait',
+      end_detail: 'Planner 调用 wait，本轮暂停并在等待结束后继续判断。',
+    } })
+    setupMonitorState({ timeline: [makeEntry('planner.progress', data)] })
+    render(<MaisakaMonitor />)
+    expect(screen.queryByText('轮次结果')).not.toBeInTheDocument()
+    setupMonitorState({ timeline: [makeEntry('planner.finalized', data)] })
+    expect(screen.getByText('轮次结果')).toBeInTheDocument()
+    expect(screen.getByText(data.final_state.end_detail!)).toBeInTheDocument()
   })
 })
 
@@ -1360,7 +1403,7 @@ describe('时间线事件卡片', () => {
     expect(screen.getByText('结果已记录')).toBeInTheDocument()
   })
 
-  it('planner.finalized 无执行结果时回退展示 tool_calls，空文本给出占位', () => {
+  it('planner.finalized 无执行结果时回退展示 tool_calls，空文本不显示占位', () => {
     setupMonitorState({
       timeline: [
         makeEntry(
@@ -1377,7 +1420,7 @@ describe('时间线事件卡片', () => {
     })
     render(<MaisakaMonitor />)
 
-    expect(screen.getByText('planner 本轮没有文本内容')).toBeInTheDocument()
+    expect(screen.queryByText('planner 本轮没有文本内容')).not.toBeInTheDocument()
     expect(screen.getByText('search_web')).toBeInTheDocument()
     // 回退条目默认视为执行成功且无耗时，成功状态不额外显示
     expect(screen.queryByText('执行成功')).not.toBeInTheDocument()
